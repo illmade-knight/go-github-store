@@ -1,0 +1,7 @@
+run_mode: "local"
+http_listen_addr: ":8096"
+firebase_project_id: "demo-project"
+cors:
+  allowed_origins:
+    - "http://localhost:4200"
+  cors_role: "github-sync"
