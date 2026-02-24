@@ -45,7 +45,7 @@ func NewSyncService(
 	optionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	mux.Handle("OPTIONS /v1/caches", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/caches/sync", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/{id}/sync", corsMiddleware(optionsHandler))
 	mux.Handle("OPTIONS /v1/caches/{id}/files", corsMiddleware(optionsHandler))
 	mux.Handle("OPTIONS /v1/caches/{id}/profiles", corsMiddleware(optionsHandler))
 	mux.Handle("OPTIONS /v1/caches/{id}/profiles/{profileId}", corsMiddleware(optionsHandler))
@@ -54,11 +54,14 @@ func NewSyncService(
 
 	// Sync Execution
 	syncEndpoint := http.HandlerFunc(apiHandler.SyncHandler)
-	mux.Handle("POST /v1/caches/sync", corsMiddleware(authMiddleware(syncEndpoint)))
+	mux.Handle("POST /v1/caches/{id}/sync", corsMiddleware(authMiddleware(syncEndpoint)))
 
 	// Cache & File Reading
 	listCachesEndpoint := http.HandlerFunc(apiHandler.ListCachesHandler)
 	mux.Handle("GET /v1/caches", corsMiddleware(authMiddleware(listCachesEndpoint)))
+
+	createCacheEndpoint := http.HandlerFunc(apiHandler.CreateCacheHandler)
+	mux.Handle("POST /v1/caches", corsMiddleware(authMiddleware(createCacheEndpoint)))
 
 	listFilesEndpoint := http.HandlerFunc(apiHandler.ListFilesMetadataHandler)
 	mux.Handle("GET /v1/caches/{id}/files", corsMiddleware(authMiddleware(listFilesEndpoint)))

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,6 +42,22 @@ type ProfileRequest struct {
 	RulesYaml string `json:"rulesYaml"`
 }
 
+func extractOwnerRepo(input string) string {
+	// Clean up whitespace
+	clean := strings.TrimSpace(input)
+
+	// Strip protocols and domain
+	clean = strings.TrimPrefix(clean, "https://github.com/")
+	clean = strings.TrimPrefix(clean, "http://github.com/")
+	clean = strings.TrimPrefix(clean, "github.com/")
+
+	// Strip trailing git extensions or slashes
+	clean = strings.TrimSuffix(clean, ".git")
+	clean = strings.TrimRight(clean, "/")
+
+	return clean
+}
+
 // CreateCacheHandler handles POST /v1/caches
 // It fetches the repository metadata, creates a skeleton in Firestore, and returns the analysis.
 func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
@@ -56,10 +73,12 @@ func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cleanRepo := extractOwnerRepo(req.Repo)
+
 	// 1. Analyze the repository via GitHub Git Trees API
-	analysis, err := a.Fetcher.AnalyzeRepository(r.Context(), req.Repo, req.Branch)
+	analysis, err := a.Fetcher.AnalyzeRepository(r.Context(), cleanRepo, req.Branch)
 	if err != nil {
-		a.Logger.Error("Failed to analyze repository", "repo", req.Repo, "error", err)
+		a.Logger.Error("Failed to analyze repository", "repo", cleanRepo, "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to analyze repository from GitHub")
 		return
 	}
