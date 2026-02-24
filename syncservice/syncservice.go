@@ -41,8 +41,40 @@ func NewSyncService(
 	corsLogger := logger.With("component", "CORS Middleware")
 	corsMiddleware := middleware.NewCorsMiddleware(cfg.CorsConfig, corsLogger)
 
+	// 4. Register OPTIONS for CORS pre-flight across all routes
+	optionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	mux.Handle("OPTIONS /v1/caches", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/sync", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/{id}/files", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/{id}/profiles", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/{id}/profiles/{profileId}", corsMiddleware(optionsHandler))
+
+	// 5. Register API Routes with CORS and Auth wrappers
+
+	// Sync Execution
 	syncEndpoint := http.HandlerFunc(apiHandler.SyncHandler)
 	mux.Handle("POST /v1/caches/sync", corsMiddleware(authMiddleware(syncEndpoint)))
+
+	// Cache & File Reading
+	listCachesEndpoint := http.HandlerFunc(apiHandler.ListCachesHandler)
+	mux.Handle("GET /v1/caches", corsMiddleware(authMiddleware(listCachesEndpoint)))
+
+	listFilesEndpoint := http.HandlerFunc(apiHandler.ListFilesMetadataHandler)
+	mux.Handle("GET /v1/caches/{id}/files", corsMiddleware(authMiddleware(listFilesEndpoint)))
+
+	// Profile CRUD Management
+	listProfilesEndpoint := http.HandlerFunc(apiHandler.ListProfilesHandler)
+	mux.Handle("GET /v1/caches/{id}/profiles", corsMiddleware(authMiddleware(listProfilesEndpoint)))
+
+	createProfileEndpoint := http.HandlerFunc(apiHandler.CreateProfileHandler)
+	mux.Handle("POST /v1/caches/{id}/profiles", corsMiddleware(authMiddleware(createProfileEndpoint)))
+
+	updateProfileEndpoint := http.HandlerFunc(apiHandler.UpdateProfileHandler)
+	mux.Handle("PUT /v1/caches/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(updateProfileEndpoint)))
+
+	deleteProfileEndpoint := http.HandlerFunc(apiHandler.DeleteProfileHandler)
+	mux.Handle("DELETE /v1/caches/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(deleteProfileEndpoint)))
 
 	return &Wrapper{
 		BaseServer: baseServer,

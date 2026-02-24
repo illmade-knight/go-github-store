@@ -13,29 +13,6 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-const (
-	BundleCollection = "CacheBundles"
-	FilesCollection  = "Files"
-	MaxBatchSize     = 500 // Firestore hard limit
-)
-
-type BundleMetadata struct {
-	Repo         string `firestore:"repo"`
-	Branch       string `firestore:"branch"`
-	LastSyncedAt int64  `firestore:"lastSyncedAt"`
-	FileCount    int    `firestore:"fileCount"`
-	Status       string `firestore:"status"`
-}
-
-type FileDoc struct {
-	Path      string `firestore:"path"`
-	Content   string `firestore:"content"`
-	SizeBytes int    `firestore:"sizeBytes"`
-	Status    string `firestore:"status"`
-	Extension string `firestore:"extension"`
-	Hash      string `firestore:"hash"`
-}
-
 type FirestoreClient struct {
 	client *firestore.Client
 	logger *slog.Logger
@@ -146,4 +123,116 @@ func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firesto
 	}
 
 	return nil
+}
+
+// ListCaches retrieves all synced repository bundles.
+func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, error) {
+	var caches []CacheMetadata
+	iter := s.client.Collection(BundleCollection).OrderBy("lastSyncedAt", firestore.Desc).Documents(ctx)
+
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			s.logger.Error("Firestore iteration failed", "error", err)
+			return nil, fmt.Errorf("failed to list caches: %w", err)
+		}
+
+		var cache CacheMetadata
+		if err := doc.DataTo(&cache); err != nil {
+			s.logger.Warn("Failed to unmarshal cache metadata", "docID", doc.Ref.ID, "error", err)
+			continue
+		}
+		cache.ID = doc.Ref.ID
+		caches = append(caches, cache)
+	}
+	s.logger.Info("Successfully retrieved caches", "count", len(caches))
+
+	// Ensure we never return a nil slice which might serialize to JSON `null` instead of `[]`
+	if caches == nil {
+		s.logger.Debug("No caches found, returning empty array")
+		return []CacheMetadata{}, nil
+	}
+	return caches, nil
+}
+
+// ListFilesMetadata retrieves the files for a cache WITHOUT the heavy content payload.
+func (s *FirestoreClient) ListFilesMetadata(ctx context.Context, cacheID string) ([]FileMetadata, error) {
+	var files []FileMetadata
+
+	// STRICT PROJECTION: Only request the lightweight fields.
+	// This prevents crashing the Go service when scanning 1,000+ files.
+	iter := s.client.Collection(BundleCollection).Doc(cacheID).
+		Collection(FilesCollection).
+		Select("path", "sizeBytes", "extension").
+		Documents(ctx)
+
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to list file metadata: %w", err)
+		}
+
+		var meta FileMetadata
+		if err := doc.DataTo(&meta); err != nil {
+			s.logger.Warn("Failed to unmarshal file metadata", "docID", doc.Ref.ID, "error", err)
+			continue
+		}
+		files = append(files, meta)
+	}
+	return files, nil
+}
+
+// --- Profile Management ---
+
+func (s *FirestoreClient) ListProfiles(ctx context.Context, cacheID string) ([]Profile, error) {
+	var profiles []Profile
+	iter := s.client.Collection(BundleCollection).Doc(cacheID).Collection(ProfilesCollection).Documents(ctx)
+
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to list profiles: %w", err)
+		}
+
+		var p Profile
+		if err := doc.DataTo(&p); err != nil {
+			s.logger.Warn("Failed to unmarshal profile", "docID", doc.Ref.ID, "error", err)
+			continue
+		}
+		p.ID = doc.Ref.ID
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+func (s *FirestoreClient) CreateProfile(ctx context.Context, cacheID string, profile *Profile) error {
+	ref := s.client.Collection(BundleCollection).Doc(cacheID).Collection(ProfilesCollection).Doc(profile.ID)
+	_, err := ref.Set(ctx, profile)
+	return err
+}
+
+func (s *FirestoreClient) UpdateProfile(ctx context.Context, cacheID string, profile *Profile) error {
+	ref := s.client.Collection(BundleCollection).Doc(cacheID).Collection(ProfilesCollection).Doc(profile.ID)
+	_, err := ref.Set(ctx, profile, firestore.MergeAll)
+	return err
+}
+
+func (s *FirestoreClient) DeleteProfile(ctx context.Context, cacheID, profileID string) error {
+	ref := s.client.Collection(BundleCollection).Doc(cacheID).Collection(ProfilesCollection).Doc(profileID)
+	_, err := ref.Delete(ctx)
+	return err
+}
+
+func (s *FirestoreClient) Close() error {
+	s.logger.Info("Closing Firestore connection")
+	return s.client.Close()
 }

@@ -12,7 +12,7 @@ type Config struct {
 	// Fields that will eventually be mapped from YAML
 	RunMode            string
 	HTTPListenAddr     string
-	FirebaseProjectID  string
+	GoogleProjectID    string
 	IdentityServiceURL string
 
 	// CorsConfig is the processed, ready-to-use middleware config.
@@ -42,9 +42,9 @@ func UpdateConfigWithEnvOverrides(cfg *Config, logger *slog.Logger) (*Config, er
 		cfg.HTTPListenAddr = ":" + port
 	}
 
-	if projectID := os.Getenv("FIREBASE_PROJECT_ID"); projectID != "" {
-		logger.Debug("Overriding config value", "key", "FIREBASE_PROJECT_ID", "source", "env")
-		cfg.FirebaseProjectID = projectID
+	if projectID := os.Getenv("GOOGLE_PROJECT_ID"); projectID != "" {
+		logger.Debug("Overriding config value", "key", "GOOGLE_PROJECT_ID", "source", "env")
+		cfg.GoogleProjectID = projectID
 	}
 
 	return cfg, nil

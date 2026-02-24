@@ -17,9 +17,9 @@ func newTestLogger() *slog.Logger {
 
 func newBaseConfig() *config.Config {
 	return &config.Config{
-		RunMode:           "base-mode",
-		HTTPListenAddr:    ":8080",
-		FirebaseProjectID: "base-project",
+		RunMode:         "base-mode",
+		HTTPListenAddr:  ":8080",
+		GoogleProjectID: "base-project",
 	}
 }
 
@@ -41,7 +41,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		// Check overridden fields
 		assert.Equal(t, "ghp_secret_token", cfg.GitHubToken)
 		assert.Equal(t, ":9090", cfg.HTTPListenAddr)
-		assert.Equal(t, "override-project", cfg.FirebaseProjectID)
+		assert.Equal(t, "override-project", cfg.GoogleProjectID)
 
 		// Non-overridden fields should remain unchanged
 		assert.Equal(t, "base-mode", cfg.RunMode)
@@ -57,6 +57,6 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 
 		assert.Equal(t, "", cfg.GitHubToken)
 		assert.Equal(t, ":8080", cfg.HTTPListenAddr)
-		assert.Equal(t, "base-project", cfg.FirebaseProjectID)
+		assert.Equal(t, "base-project", cfg.GoogleProjectID)
 	})
 }

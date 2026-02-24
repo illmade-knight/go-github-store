@@ -10,7 +10,7 @@ import (
 type YamlConfig struct {
 	RunMode            string `yaml:"run_mode"`
 	HTTPListenAddr     string `yaml:"http_listen_addr"`
-	FirebaseProjectID  string `yaml:"firebase_project_id"`
+	GoogleProjectID    string `yaml:"google_project_id"`
 	IdentityServiceURL string `yaml:"identity_service_url"`
 	Cors               struct {
 		AllowedOrigins []string `yaml:"allowed_origins"`
@@ -27,7 +27,7 @@ func NewConfigFromYaml(baseCfg *YamlConfig, logger *slog.Logger) (*Config, error
 		RunMode:            baseCfg.RunMode,
 		HTTPListenAddr:     baseCfg.HTTPListenAddr,
 		IdentityServiceURL: baseCfg.IdentityServiceURL,
-		FirebaseProjectID:  baseCfg.FirebaseProjectID,
+		GoogleProjectID:    baseCfg.GoogleProjectID,
 		CorsConfig: middleware.CorsConfig{
 			AllowedOrigins: baseCfg.Cors.AllowedOrigins,
 			Role:           middleware.CorsRole(baseCfg.Cors.Role),

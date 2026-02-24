@@ -57,22 +57,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4. Load GitHub Ignore Rules
-	ignoreCfg, err := config.LoadGitHubIgnoreConfig(ignoreFile)
-	if err != nil {
-		logger.Error("Failed to load github ignore configuration", "error", err)
-		os.Exit(1)
-	}
-
 	ctx := context.Background()
 
-	firestoreStore, err := newDependencies(ctx, cfg, logger)
+	firestoreStore, githubFetcher, err := newDependencies(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("Failed to initialize dependencies", "error", err)
 		os.Exit(1)
 	}
-
-	githubFetcher := github.NewClient(cfg.GitHubToken, ignoreCfg, logger.With("component", "GitHub"))
+	defer firestoreStore.Close()
 
 	// 3b. Authentication Middleware
 	authMiddleware, err := newAuthMiddleware(cfg, logger)
@@ -113,18 +105,26 @@ func main() {
 }
 
 // newDependencies builds the GenAI client.
-func newDependencies(ctx context.Context, cfg *config.Config, logger *slog.Logger) (store.Store, error) {
+func newDependencies(ctx context.Context, cfg *config.Config, logger *slog.Logger) (store.Store, *github.Client, error) {
 	// 5. Initialize Infrastructure Clients
 	// Firestore relies on GOOGLE_APPLICATION_CREDENTIALS being present in the environment
-	fsClient, err := firestore.NewClient(ctx, cfg.FirebaseProjectID)
+	fsClient, err := firestore.NewClient(ctx, cfg.GoogleProjectID)
 	if err != nil {
 		logger.Error("Failed to initialize Firestore client", "error", err)
 		os.Exit(1)
 	}
-	defer fsClient.Close()
 
 	firestoreStore := store.NewFirestoreClient(fsClient, logger.With("component", "Firestore"))
-	return firestoreStore, nil
+
+	// 4. Load GitHub Ignore Rules
+	ignoreCfg, err := config.LoadGitHubIgnoreConfig(ignoreFile)
+	if err != nil {
+		logger.Error("Failed to load github ignore configuration", "error", err)
+		os.Exit(1)
+	}
+	githubFetcher := github.NewClient(cfg.GitHubToken, ignoreCfg, logger.With("component", "GitHub"))
+
+	return firestoreStore, githubFetcher, nil
 }
 
 // newAuthMiddleware creates the JWT-validating middleware, or a bypass if in DEV mode.
