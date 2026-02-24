@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-github-store/internal/config"
+	"github.com/tinywideclouds/go-github-store/internal/filter"
 )
 
 func newTestLogger() *slog.Logger {
@@ -27,11 +28,23 @@ func mockIgnoreConfig() *config.GitHubIgnoreConfig {
 	}
 }
 
-func TestFetchRepository(t *testing.T) {
-	// 1. Setup Mock GitHub API Server
+// setupMockGitHubServer creates a mock server that simulates branch resolution, commit lookup, and tree fetching.
+func setupMockGitHubServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/repos/test-org/test-repo/git/trees/main", func(w http.ResponseWriter, r *http.Request) {
+	// 1. Mock Default Branch Resolution
+	mux.HandleFunc("/repos/test-org/test-repo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"default_branch": "main"})
+	})
+
+	// 2. Mock Commit SHA Resolution
+	mux.HandleFunc("/repos/test-org/test-repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"sha": "mock-commit-sha"})
+	})
+
+	// 3. Mock Git Trees API (Using the resolved Commit SHA)
+	mux.HandleFunc("/repos/test-org/test-repo/git/trees/mock-commit-sha", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "1", r.URL.Query().Get("recursive"))
 		assert.Equal(t, "Bearer mock-token", r.Header.Get("Authorization"))
 
 		response := gitTreeResponse{
@@ -44,38 +57,65 @@ func TestFetchRepository(t *testing.T) {
 				Size int    `json:"size"`
 			}{
 				{Path: "main.go", Type: "blob", Sha: "sha-main-go", Size: 100},
-				{Path: "node_modules/index.js", Type: "blob", Sha: "sha-ignore-1", Size: 200}, // Should ignore
-				{Path: "logo.png", Type: "blob", Sha: "sha-ignore-2", Size: 300},              // Should ignore
+				{Path: "node_modules/index.js", Type: "blob", Sha: "sha-ignore-1", Size: 200}, // Should ignore (Global)
+				{Path: "logo.png", Type: "blob", Sha: "sha-ignore-2", Size: 300},              // Should ignore (Global)
 				{Path: "utils.go", Type: "blob", Sha: "sha-utils-go", Size: 150},
+				{Path: "test_data.json", Type: "blob", Sha: "sha-json", Size: 50}, // Should ignore (Dynamic Rules)
 			},
 		}
 		json.NewEncoder(w).Encode(response)
 	})
 
+	// 4. Mock Blobs
 	mux.HandleFunc("/repos/test-org/test-repo/git/blobs/sha-main-go", func(w http.ResponseWriter, r *http.Request) {
 		content := base64.StdEncoding.EncodeToString([]byte("package main"))
 		json.NewEncoder(w).Encode(gitBlobResponse{Content: content, Encoding: "base64", Size: 100})
 	})
 
 	mux.HandleFunc("/repos/test-org/test-repo/git/blobs/sha-utils-go", func(w http.ResponseWriter, r *http.Request) {
-		// Simulate GitHub's multi-line base64 formatting
 		content := base64.StdEncoding.EncodeToString([]byte("package utils\n\nfunc Run() {}"))
 		json.NewEncoder(w).Encode(gitBlobResponse{Content: content + "\n", Encoding: "base64", Size: 150})
 	})
 
-	ts := httptest.NewServer(mux)
+	return httptest.NewServer(mux)
+}
+
+func TestAnalyzeRepository(t *testing.T) {
+	ts := setupMockGitHubServer(t)
 	defer ts.Close()
 
-	// 2. Setup Client with Mock Server URL
 	client := NewClient("mock-token", mockIgnoreConfig(), newTestLogger())
-	client.baseURL = ts.URL // Override for testing
+	client.baseURL = ts.URL
 
-	// 3. Execute Fetch
-	files, err := client.FetchRepository(context.Background(), "test-org/test-repo", "main")
+	// Execute Analyze (Passing empty string to test default branch resolution)
+	analysis, err := client.AnalyzeRepository(context.Background(), "test-org/test-repo", "")
 
-	// 4. Assertions
 	require.NoError(t, err)
-	assert.Len(t, files, 2, "Should have fetched exactly 2 valid files, ignoring the others")
+	assert.Equal(t, "main", analysis.Branch, "Should have resolved the default branch")
+	assert.Equal(t, "mock-commit-sha", analysis.CommitSHA)
+	assert.Equal(t, 3, analysis.TotalFiles, "Should have counted main.go, utils.go, test_data.json")
+	assert.Equal(t, 300, analysis.TotalSizeBytes) // 100 + 150 + 50
+	assert.Equal(t, 2, analysis.Extensions[".go"])
+	assert.Equal(t, 1, analysis.Extensions[".json"])
+}
+
+func TestFetchRepository(t *testing.T) {
+	ts := setupMockGitHubServer(t)
+	defer ts.Close()
+
+	client := NewClient("mock-token", mockIgnoreConfig(), newTestLogger())
+	client.baseURL = ts.URL
+
+	// Execute Fetch with Dynamic Ingestion Rules (Exclude .json files)
+	rules := &filter.FilterRules{
+		Exclude: []string{"**/*.json"},
+	}
+
+	files, err := client.FetchRepository(context.Background(), "test-org/test-repo", "main", rules)
+
+	// Assertions
+	require.NoError(t, err)
+	assert.Len(t, files, 2, "Should have fetched exactly 2 valid files, ignoring global and dynamic ignores")
 
 	// Order is non-deterministic due to concurrency, so we map them
 	fileMap := make(map[string]SyncFile)
@@ -90,4 +130,6 @@ func TestFetchRepository(t *testing.T) {
 	assert.Contains(t, fileMap, "utils.go")
 	assert.Equal(t, "package utils\n\nfunc Run() {}", fileMap["utils.go"].Content)
 	assert.Equal(t, ".go", fileMap["utils.go"].Extension)
+
+	assert.NotContains(t, fileMap, "test_data.json", "Dynamic rules should have excluded this file")
 }

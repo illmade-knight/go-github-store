@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/tinywideclouds/go-github-store/internal/config"
+	"github.com/tinywideclouds/go-github-store/internal/filter"
 )
 
 // SyncFile represents a single processed file ready to be written to the data store.
@@ -17,9 +18,21 @@ type SyncFile struct {
 	Extension string
 }
 
+// RepositoryAnalysis contains metadata from a lightweight tree traversal.
+type RepositoryAnalysis struct {
+	Repo           string
+	Branch         string // The explicitly resolved branch (e.g., if empty was passed, this holds "main")
+	CommitSHA      string // The SHA of the tree analyzed
+	TotalFiles     int
+	TotalSizeBytes int
+	Extensions     map[string]int
+}
+
 // Fetcher defines the contract for retrieving and processing a repository tree.
 type Fetcher interface {
-	FetchRepository(ctx context.Context, repo, branch string) ([]SyncFile, error)
+	FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules) ([]SyncFile, error)
+	// AnalyzeRepository performs a lightweight fetch to calculate file metrics without downloading contents.
+	AnalyzeRepository(ctx context.Context, repo, branch string) (*RepositoryAnalysis, error)
 }
 
 // ShouldIgnore evaluates the file path against the provided configuration

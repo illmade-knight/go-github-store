@@ -22,12 +22,41 @@ func NewFirestoreClient(client *firestore.Client, logger *slog.Logger) *Firestor
 	return &FirestoreClient{client: client, logger: logger}
 }
 
+// Close gracefully shuts down the underlying Firestore client connection.
+func (s *FirestoreClient) Close() error {
+	s.logger.Info("Closing Firestore connection")
+	return s.client.Close()
+}
+
 // GenerateDocID creates a safe Firestore document ID from a file path.
 func GenerateDocID(path string) string {
 	return base64.URLEncoding.EncodeToString([]byte(path))
 }
 
-func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch string, files []github.SyncFile) error {
+// GetCache retrieves a single cache bundle's metadata.
+func (s *FirestoreClient) GetCache(ctx context.Context, cacheID string) (*CacheMetadata, error) {
+	doc, err := s.client.Collection(BundleCollection).Doc(cacheID).Get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cache document: %w", err)
+	}
+
+	var meta CacheMetadata
+	if err := doc.DataTo(&meta); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cache metadata: %w", err)
+	}
+	meta.ID = doc.Ref.ID
+	return &meta, nil
+}
+
+// CreateCache saves the initial skeleton and analysis to Firestore.
+func (s *FirestoreClient) CreateCache(ctx context.Context, meta *CacheMetadata) error {
+	// We explicitly omit meta.ID in the struct tags, so we use it as the path here
+	ref := s.client.Collection(BundleCollection).Doc(meta.ID)
+	_, err := ref.Set(ctx, meta)
+	return err
+}
+
+func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile) error {
 	s.logger.Info("Starting Firestore sync", "cacheID", cacheID, "incoming_files", len(files))
 
 	bundleRef := s.client.Collection(BundleCollection).Doc(cacheID)
@@ -58,22 +87,23 @@ func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch st
 	diff := file.CalculateDiff(existingFiles, files)
 	s.logger.Info("Diff calculated", "to_write", len(diff.ToWrite), "to_delete", len(diff.ToDelete))
 
-	metadata := BundleMetadata{
-		Repo:         repo,
-		Branch:       branch,
-		LastSyncedAt: time.Now().Unix(),
-		FileCount:    len(files),
-		Status:       "ready",
+	// We only update the sync-related fields to avoid overwriting the Analysis
+	updates := map[string]interface{}{
+		"syncedCommitSha": commitSHA,
+		"lastSyncedAt":    time.Now().Unix(),
+		"fileCount":       len(files),
+		"status":          "ready",
 	}
 
-	return s.executeBatches(ctx, bundleRef, filesRef, diff, metadata)
+	return s.executeBatches(ctx, bundleRef, filesRef, diff, updates)
 }
 
-func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firestore.DocumentRef, filesRef *firestore.CollectionRef, diff file.DiffResult, metadata BundleMetadata) error {
+func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firestore.DocumentRef, filesRef *firestore.CollectionRef, diff file.DiffResult, updates map[string]interface{}) error {
 	batch := s.client.Batch()
 	opCount := 0
 
-	batch.Set(bundleRef, metadata)
+	// Use MergeAll to protect the existing Analysis payload from being erased
+	batch.Set(bundleRef, updates, firestore.MergeAll)
 	opCount++
 
 	commitBatch := func() error {
@@ -127,6 +157,8 @@ func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firesto
 
 // ListCaches retrieves all synced repository bundles.
 func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, error) {
+	s.logger.Debug("Executing Firestore query for CacheBundles", "collection", BundleCollection)
+
 	var caches []CacheMetadata
 	iter := s.client.Collection(BundleCollection).OrderBy("lastSyncedAt", firestore.Desc).Documents(ctx)
 
@@ -137,7 +169,7 @@ func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, erro
 		}
 		if err != nil {
 			s.logger.Error("Firestore iteration failed", "error", err)
-			return nil, fmt.Errorf("failed to list caches: %w", err)
+			return nil, fmt.Errorf("failed to iterate caches: %w", err)
 		}
 
 		var cache CacheMetadata
@@ -148,13 +180,14 @@ func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, erro
 		cache.ID = doc.Ref.ID
 		caches = append(caches, cache)
 	}
+
 	s.logger.Info("Successfully retrieved caches", "count", len(caches))
 
-	// Ensure we never return a nil slice which might serialize to JSON `null` instead of `[]`
 	if caches == nil {
 		s.logger.Debug("No caches found, returning empty array")
 		return []CacheMetadata{}, nil
 	}
+
 	return caches, nil
 }
 
@@ -230,9 +263,4 @@ func (s *FirestoreClient) DeleteProfile(ctx context.Context, cacheID, profileID 
 	ref := s.client.Collection(BundleCollection).Doc(cacheID).Collection(ProfilesCollection).Doc(profileID)
 	_, err := ref.Delete(ctx)
 	return err
-}
-
-func (s *FirestoreClient) Close() error {
-	s.logger.Info("Closing Firestore connection")
-	return s.client.Close()
 }

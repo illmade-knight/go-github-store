@@ -2,14 +2,13 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
+	"github.com/tinywideclouds/go-github-store/internal/filter"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-microservice-base/pkg/response"
@@ -22,10 +21,13 @@ type API struct {
 	Logger  *slog.Logger
 }
 
+type CreateCacheRequest struct {
+	Repo   string `json:"repo"`
+	Branch string `json:"branch"` // Optional, will default to main/master via Fetcher
+}
+
 type SyncRequest struct {
-	Repo    string `json:"repo"`
-	Branch  string `json:"branch"`
-	CacheID string `json:"cacheId"` // Optional
+	IngestionRules filter.FilterRules `json:"ingestionRules"`
 }
 
 type SyncResponse struct {
@@ -39,44 +41,93 @@ type ProfileRequest struct {
 	RulesYaml string `json:"rulesYaml"`
 }
 
-// validateYamlRules ensures the provided string maps correctly to our FilterRules struct.
-func validateYamlRules(yamlStr string) error {
-	var rules store.FilterRules
-	if err := yaml.Unmarshal([]byte(yamlStr), &rules); err != nil {
-		return fmt.Errorf("invalid YAML structure: %w", err)
-	}
-	return nil
-}
-
-// SyncHandler handles the POST /v1/caches/sync request.
-func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
-	var req SyncRequest
+// CreateCacheHandler handles POST /v1/caches
+// It fetches the repository metadata, creates a skeleton in Firestore, and returns the analysis.
+func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
+	var req CreateCacheRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.Logger.Warn("Invalid JSON body received", "error", err)
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
 
-	if req.Repo == "" || req.Branch == "" {
-		a.Logger.Warn("Missing required fields", "repo", req.Repo, "branch", req.Branch)
-		response.WriteJSONError(w, http.StatusBadRequest, "Both 'repo' and 'branch' are required fields")
+	if req.Repo == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "'repo' is a required field")
 		return
 	}
 
-	cacheID := req.CacheID
-	if cacheID == "" {
-		cacheID = "urn:llm:cache:" + uuid.New().String()
-		a.Logger.Info("No cacheId provided, generated new one", "cacheId", cacheID)
-	}
-
-	files, err := a.Fetcher.FetchRepository(r.Context(), req.Repo, req.Branch)
+	// 1. Analyze the repository via GitHub Git Trees API
+	analysis, err := a.Fetcher.AnalyzeRepository(r.Context(), req.Repo, req.Branch)
 	if err != nil {
-		a.Logger.Error("Failed to fetch repository", "repo", req.Repo, "error", err)
-		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to fetch repository from GitHub")
+		a.Logger.Error("Failed to analyze repository", "repo", req.Repo, "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to analyze repository from GitHub")
 		return
 	}
 
-	if err := a.Store.SaveSync(r.Context(), cacheID, req.Repo, req.Branch, files); err != nil {
+	// 2. Prepare the Cache Skeleton
+	cacheID := "urn:llm:cache:" + uuid.New().String()
+	meta := &store.CacheMetadata{
+		ID:              cacheID,
+		Repo:            analysis.Repo,
+		Branch:          analysis.Branch,
+		SyncedCommitSHA: analysis.CommitSHA,
+		Status:          "unsynced",
+		Analysis: store.CacheAnalysis{
+			TotalFiles:     analysis.TotalFiles,
+			TotalSizeBytes: analysis.TotalSizeBytes,
+			Extensions:     analysis.Extensions,
+		},
+	}
+
+	// 3. Save to Firestore
+	if err := a.Store.CreateCache(r.Context(), meta); err != nil {
+		a.Logger.Error("Failed to create cache skeleton", "cacheId", cacheID, "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist cache skeleton")
+		return
+	}
+
+	response.WriteJSON(w, http.StatusCreated, meta)
+}
+
+// SyncHandler handles POST /v1/caches/{id}/sync
+// It pulls the skeleton, applies ingestion filters, downloads files, and updates Firestore.
+func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
+	cacheID := r.PathValue("id")
+	if cacheID == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID")
+		return
+	}
+
+	var req SyncRequest
+	// We ignore EOF errors here as the body might intentionally be empty if they want to sync everything
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+
+	// 1. Fetch the existing Cache Skeleton
+	cache, err := a.Store.GetCache(r.Context(), cacheID)
+	if err != nil {
+		a.Logger.Warn("Cache not found for sync", "cacheId", cacheID)
+		response.WriteJSONError(w, http.StatusNotFound, "Cache not found")
+		return
+	}
+
+	if cache.Status == "syncing" {
+		response.WriteJSONError(w, http.StatusConflict, "Cache is already currently syncing")
+		return
+	}
+
+	// 2. Fetch from GitHub with Ingestion Rules applied
+	files, err := a.Fetcher.FetchRepository(r.Context(), cache.Repo, cache.Branch, &req.IngestionRules)
+	if err != nil {
+		a.Logger.Error("Failed to fetch repository contents", "repo", cache.Repo, "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to download repository contents from GitHub")
+		return
+	}
+
+	// 3. Save files and updated metadata to Firestore
+	if err := a.Store.SaveSync(r.Context(), cacheID, cache.Repo, cache.Branch, cache.SyncedCommitSHA, files); err != nil {
 		a.Logger.Error("Failed to save sync to database", "cacheId", cacheID, "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist repository data")
 		return
@@ -163,8 +214,9 @@ func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateYamlRules(req.RulesYaml); err != nil {
-		response.WriteJSONError(w, http.StatusBadRequest, "Invalid YAML format: "+err.Error())
+	// Use our new isolated filter package for YAML validation
+	if _, err := filter.ParseYAML(req.RulesYaml); err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -205,8 +257,8 @@ func (a *API) UpdateProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateYamlRules(req.RulesYaml); err != nil {
-		response.WriteJSONError(w, http.StatusBadRequest, "Invalid YAML format: "+err.Error())
+	if _, err := filter.ParseYAML(req.RulesYaml); err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
