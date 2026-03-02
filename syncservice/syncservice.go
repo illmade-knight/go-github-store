@@ -49,6 +49,7 @@ func NewSyncService(
 	mux.Handle("OPTIONS /v1/caches/{id}/files", corsMiddleware(optionsHandler))
 	mux.Handle("OPTIONS /v1/caches/{id}/profiles", corsMiddleware(optionsHandler))
 	mux.Handle("OPTIONS /v1/caches/{id}/profiles/{profileId}", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/caches/{id}/files/{base64Path}/content", corsMiddleware(optionsHandler))
 
 	// 5. Register API Routes with CORS and Auth wrappers
 
@@ -65,6 +66,10 @@ func NewSyncService(
 
 	listFilesEndpoint := http.HandlerFunc(apiHandler.ListFilesMetadataHandler)
 	mux.Handle("GET /v1/caches/{id}/files", corsMiddleware(authMiddleware(listFilesEndpoint)))
+
+	// File Content Endpoint
+	getFileContentEndpoint := http.HandlerFunc(apiHandler.GetFileContentHandler)
+	mux.Handle("GET /v1/caches/{id}/files/{base64Path}/content", corsMiddleware(authMiddleware(getFileContentEndpoint)))
 
 	// Profile CRUD Management
 	listProfilesEndpoint := http.HandlerFunc(apiHandler.ListProfilesHandler)

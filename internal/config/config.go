@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/tinywideclouds/go-llm/pkg/cache/v1"
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
@@ -15,6 +16,7 @@ type Config struct {
 	GoogleProjectID    string
 	IdentityServiceURL string
 
+	StoreCollections cache.StoreCollections
 	// CorsConfig is the processed, ready-to-use middleware config.
 	CorsConfig middleware.CorsConfig
 
@@ -32,6 +34,11 @@ func UpdateConfigWithEnvOverrides(cfg *Config, logger *slog.Logger) (*Config, er
 		cfg.IdentityServiceURL = idURL
 	}
 
+	if projectID := os.Getenv("GOOGLE_PROJECT_ID"); projectID != "" {
+		logger.Debug("Overriding config value", "key", "GOOGLE_PROJECT_ID", "source", "env")
+		cfg.GoogleProjectID = projectID
+	}
+
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		logger.Debug("Loaded config value", "key", "GITHUB_TOKEN", "source", "env")
 		cfg.GitHubToken = token
@@ -40,11 +47,6 @@ func UpdateConfigWithEnvOverrides(cfg *Config, logger *slog.Logger) (*Config, er
 	if port := os.Getenv("PORT"); port != "" {
 		logger.Debug("Overriding config value", "key", "PORT", "source", "env")
 		cfg.HTTPListenAddr = ":" + port
-	}
-
-	if projectID := os.Getenv("GOOGLE_PROJECT_ID"); projectID != "" {
-		logger.Debug("Overriding config value", "key", "GOOGLE_PROJECT_ID", "source", "env")
-		cfg.GoogleProjectID = projectID
 	}
 
 	return cfg, nil

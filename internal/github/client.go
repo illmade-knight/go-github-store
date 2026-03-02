@@ -11,7 +11,8 @@ import (
 	"sync"
 
 	"github.com/tinywideclouds/go-github-store/internal/config"
-	"github.com/tinywideclouds/go-github-store/internal/filter"
+
+	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
 )
 
 const (
@@ -182,7 +183,16 @@ func (c *Client) AnalyzeRepository(ctx context.Context, repo, branch string) (*R
 }
 
 // FetchRepository orchestrates fetching the tree and downloading the allowed blobs.
-func (c *Client) FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules) ([]SyncFile, error) {
+func (c *Client) FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules, sendEvent func(stage string, details map[string]any)) ([]SyncFile, error) {
+	c.logger.Info("Fetching repository tree for sync", "repo", repo, "requested_branch", branch)
+
+	if sendEvent != nil {
+		sendEvent("fetch_tree", map[string]any{
+			"message":          "Fetching repository tree for sync",
+			"repo":             repo,
+			"requested_branch": branch,
+		})
+	}
 	c.logger.Info("Fetching repository tree for sync", "repo", repo, "requested_branch", branch)
 
 	// Ensure we are working with the exact branch and SHA even if defaults were requested
@@ -239,6 +249,14 @@ func (c *Client) FetchRepository(ctx context.Context, repo, branch string, rules
 	}
 
 	c.logger.Info("Tree fetched and filtered", "total_items", len(treeData.Tree), "valid_blobs", len(validBlobs))
+
+	if sendEvent != nil {
+		sendEvent("tree_filtered", map[string]any{
+			"message":     "Tree fetched and filtered",
+			"total_items": len(treeData.Tree),
+			"valid_blobs": len(validBlobs),
+		})
+	}
 
 	// 3. Concurrently fetch blobs
 	results := make([]SyncFile, 0, len(validBlobs))

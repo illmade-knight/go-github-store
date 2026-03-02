@@ -4,28 +4,17 @@ import (
 	"context"
 	"time"
 
-	"github.com/tinywideclouds/go-github-store/internal/filter"
 	"github.com/tinywideclouds/go-github-store/internal/github"
-)
-
-const (
-	BundleCollection   = "CacheBundles"
-	FilesCollection    = "Files"
-	ProfilesCollection = "FilterProfiles"
-	MaxBatchSize       = 500 // Firestore hard limit
+	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
 )
 
 // Profile represents a saved filter configuration for a specific cache bundle.
 type Profile struct {
-	ID             string             `json:"id" firestore:"-"` // Firestore Document ID
-	Name           string             `json:"name" firestore:"name"`
-	RulesYaml      string             `json:"rulesYaml" firestore:"rulesYaml"`
-	CreatedAt      time.Time          `json:"createdAt" firestore:"createdAt"`
-	UpdatedAt      time.Time          `json:"updatedAt" firestore:"updatedAt"`
-	FileCount      int                `json:"fileCount" firestore:"fileCount"`
-	Status         string             `json:"status" firestore:"status"`
-	Analysis       CacheAnalysis      `json:"analysis" firestore:"analysis"`
-	IngestionRules filter.FilterRules `json:"ingestionRules" firestore:"ingestionRules"`
+	ID        string    `json:"id" firestore:"-"`
+	Name      string    `json:"name" firestore:"name"`
+	RulesYaml string    `json:"rulesYaml" firestore:"rulesYaml"`
+	CreatedAt time.Time `json:"createdAt" firestore:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt" firestore:"updatedAt"`
 }
 
 // CacheAnalysis holds the pre-sync metadata calculated from the GitHub tree.
@@ -79,13 +68,14 @@ type FileDoc struct {
 type Store interface {
 	// Write Operations
 
-	SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile) error
+	SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error
 	CreateCache(ctx context.Context, meta *CacheMetadata) error
 
 	// Read Operations
 	GetCache(ctx context.Context, cacheID string) (*CacheMetadata, error)
 	ListCaches(ctx context.Context) ([]CacheMetadata, error)
 	ListFilesMetadata(ctx context.Context, cacheID string) ([]FileMetadata, error)
+	GetFileContent(ctx context.Context, cacheID string, docID string) (string, error)
 
 	// Profile Management
 	ListProfiles(ctx context.Context, cacheID string) ([]Profile, error)

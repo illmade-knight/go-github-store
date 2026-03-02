@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,10 +12,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/tinywideclouds/go-github-store/internal/api"
-	"github.com/tinywideclouds/go-github-store/internal/filter"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 	"github.com/tinywideclouds/go-github-store/internal/store"
+	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
 )
 
 // --- Mocks ---
@@ -25,7 +27,11 @@ type mockFetcher struct {
 	err      error
 }
 
-func (m *mockFetcher) FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules) ([]github.SyncFile, error) {
+func (m *mockFetcher) FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules, sendEvent func(stage string, details map[string]any)) ([]github.SyncFile, error) {
+	// Simulate an event emission during tests to ensure no panics occur
+	if sendEvent != nil {
+		sendEvent("mock_fetch", map[string]any{"status": "ok"})
+	}
 	return m.files, m.err
 }
 
@@ -49,16 +55,17 @@ type mockStore struct {
 	savedFiles     []github.SyncFile
 	err            error
 
-	cacheCreated   *store.CacheMetadata
-	getCacheReturn *store.CacheMetadata
-	caches         []store.CacheMetadata
-	fileMetas      []store.FileMetadata
-	profiles       []store.Profile
-	profileSaved   *store.Profile
-	deletedID      string
+	cacheCreated      *store.CacheMetadata
+	getCacheReturn    *store.CacheMetadata
+	caches            []store.CacheMetadata
+	fileMetas         []store.FileMetadata
+	fileContentReturn string
+	profiles          []store.Profile
+	profileSaved      *store.Profile
+	deletedID         string
 }
 
-func (m *mockStore) SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile) error {
+func (m *mockStore) SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error {
 	m.savedCacheID = cacheID
 	m.savedCommitSHA = commitSHA
 	m.savedFiles = files
@@ -76,6 +83,12 @@ func (m *mockStore) GetCache(ctx context.Context, cacheID string) (*store.CacheM
 }
 func (m *mockStore) ListCaches(ctx context.Context) ([]store.CacheMetadata, error) {
 	return m.caches, m.err
+}
+func (m *mockStore) GetFileContent(ctx context.Context, cacheID string, docID string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.fileContentReturn, nil
 }
 func (m *mockStore) ListFilesMetadata(ctx context.Context, cacheID string) ([]store.FileMetadata, error) {
 	return m.fileMetas, m.err
@@ -163,11 +176,16 @@ func TestSyncHandler(t *testing.T) {
 
 	apiHandler.SyncHandler(w, req)
 
+	// The HTTP Flusher implicitly writes a 200 OK when headers are flushed.
 	assert.Equal(t, http.StatusOK, w.Code)
-	var res api.SyncResponse
-	json.NewDecoder(w.Body).Decode(&res)
-	assert.Equal(t, "success", res.Status)
-	assert.Equal(t, "cache-123", res.CacheID)
+
+	// Because this is now an SSE stream, we read the raw text stream
+	bodyStr := w.Body.String()
+
+	// Assert the SSE formatted stream includes our events
+	assert.Contains(t, bodyStr, `"stage":"init"`)
+	assert.Contains(t, bodyStr, `"stage":"complete"`)
+	assert.Contains(t, bodyStr, `"filesProcessed":1`)
 
 	// Assert database save sync was called correctly
 	assert.Equal(t, "cache-123", storeMock.savedCacheID)
@@ -232,4 +250,47 @@ func TestListFilesMetadataHandler(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&res)
 	assert.Len(t, res["files"], 1)
 	assert.Equal(t, "main.go", res["files"][0].Path)
+}
+
+func TestGetFileContentHandler_Success(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{
+		fileContentReturn: "package main\n\nfunc main() {}",
+	}
+	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/caches/cache-1/files/base64-encoded-path/content", nil)
+	req.SetPathValue("id", "cache-1")
+	req.SetPathValue("base64Path", "base64-encoded-path")
+	w := httptest.NewRecorder()
+
+	apiHandler.GetFileContentHandler(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var res map[string]string
+	json.NewDecoder(w.Body).Decode(&res)
+	assert.Equal(t, "package main\n\nfunc main() {}", res["content"])
+}
+
+// NEW: Test GetFileContentHandler Not Found / DB Error
+func TestGetFileContentHandler_NotFound(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{
+		err: errors.New("firestore: document not found"),
+	}
+	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/caches/cache-1/files/bad-path/content", nil)
+	req.SetPathValue("id", "cache-1")
+	req.SetPathValue("base64Path", "bad-path")
+	w := httptest.NewRecorder()
+
+	apiHandler.GetFileContentHandler(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var res map[string]string
+	json.NewDecoder(w.Body).Decode(&res)
+	assert.Contains(t, res["error"], "File not found")
 }

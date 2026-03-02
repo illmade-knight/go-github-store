@@ -19,12 +19,9 @@ func TestNewConfigFromYaml(t *testing.T) {
 			HTTPListenAddr:  ":9090",
 			GoogleProjectID: "test-google-project",
 			Cors: struct {
-				AllowedOrigins []string `yaml:"allowed_origins"`
-				Role           string   `yaml:"cors_role"`
-			}{
-				AllowedOrigins: []string{"http://origin1.com", "http://origin2.com"},
-				Role:           "my-custom-role",
-			},
+				AllowedOrigins []string "yaml:\"allowed_origins\""
+				Role           string   "yaml:\"cors_role\""
+			}{},
 		}
 
 		cfg, err := config.NewConfigFromYaml(yamlCfg, logger)

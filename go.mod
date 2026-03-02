@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/firestore v1.21.0
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
+	github.com/tinywideclouds/go-llm v0.0.3-beta
 	github.com/tinywideclouds/go-microservice-base v0.0.8
 	google.golang.org/api v0.256.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -37,6 +38,7 @@ require (
 	github.com/lestrrat-go/option v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
+	github.com/tinywideclouds/gen-llm v0.0.2-beta // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/valyala/histogram v1.2.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
@@ -56,5 +58,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20251111163417-95abcf5c77ba // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251111163417-95abcf5c77ba // indirect
 	google.golang.org/grpc v1.76.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )

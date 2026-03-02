@@ -2,17 +2,20 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/tinywideclouds/go-github-store/internal/filter"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-microservice-base/pkg/response"
+
+	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
 )
 
 // API holds the injected domain dependencies and handles HTTP requests.
@@ -137,27 +140,46 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Fetch from GitHub with Ingestion Rules applied
-	files, err := a.Fetcher.FetchRepository(r.Context(), cache.Repo, cache.Branch, &req.IngestionRules)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		response.WriteJSONError(w, http.StatusInternalServerError, "Streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// 2. Create a thread-safe progress emitter
+	var streamMu sync.Mutex
+	sendEvent := func(stage string, details map[string]any) {
+		streamMu.Lock()
+		defer streamMu.Unlock()
+
+		payload := map[string]any{"stage": stage, "details": details}
+		bytes, _ := json.Marshal(payload)
+
+		// SSE format requires "data: {json}\n\n"
+		fmt.Fprintf(w, "data: %s\n\n", string(bytes))
+		flusher.Flush()
+	}
+
+	// 3. Start Streaming!
+	sendEvent("init", map[string]any{"message": "Starting sync process..."})
+
+	// 4. Pass the emitter DOWN into the deep domain functions
+	files, err := a.Fetcher.FetchRepository(r.Context(), cache.Repo, cache.Branch, &req.IngestionRules, sendEvent)
 	if err != nil {
-		a.Logger.Error("Failed to fetch repository contents", "repo", cache.Repo, "error", err)
-		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to download repository contents from GitHub")
+		sendEvent("error", map[string]any{"message": "Failed to fetch from GitHub"})
 		return
 	}
 
-	// 3. Save files and updated metadata to Firestore
-	if err := a.Store.SaveSync(r.Context(), cacheID, cache.Repo, cache.Branch, cache.SyncedCommitSHA, files); err != nil {
-		a.Logger.Error("Failed to save sync to database", "cacheId", cacheID, "error", err)
-		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist repository data")
+	if err := a.Store.SaveSync(r.Context(), cacheID, cache.Repo, cache.Branch, cache.SyncedCommitSHA, files, sendEvent); err != nil {
+		sendEvent("error", map[string]any{"message": "Failed to save to Firestore"})
 		return
 	}
 
-	res := SyncResponse{
-		CacheID:        cacheID,
-		Status:         "success",
-		FilesProcessed: len(files),
-	}
-	response.WriteJSON(w, http.StatusOK, res)
+	sendEvent("complete", map[string]any{"filesProcessed": len(files)})
 }
 
 // ListCachesHandler handles GET /v1/caches
@@ -313,4 +335,27 @@ func (a *API) DeleteProfileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// GetFileContentHandler handles GET /v1/caches/{id}/files/{base64Path}/content
+func (a *API) GetFileContentHandler(w http.ResponseWriter, r *http.Request) {
+	cacheID := r.PathValue("id")
+	base64Path := r.PathValue("base64Path")
+
+	if cacheID == "" || base64Path == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID or base64 file path")
+		return
+	}
+
+	content, err := a.Store.GetFileContent(r.Context(), cacheID, base64Path)
+	if err != nil {
+		a.Logger.Error("Failed to fetch file content", "cacheId", cacheID, "docId", base64Path, "error", err)
+		response.WriteJSONError(w, http.StatusNotFound, "File not found or unreadable")
+		return
+	}
+
+	// Wrap in JSON for safe, predictable frontend parsing
+	response.WriteJSON(w, http.StatusOK, map[string]string{
+		"content": content,
+	})
 }

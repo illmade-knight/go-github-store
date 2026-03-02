@@ -114,7 +114,7 @@ func newDependencies(ctx context.Context, cfg *config.Config, logger *slog.Logge
 		os.Exit(1)
 	}
 
-	firestoreStore := store.NewFirestoreClient(fsClient, logger.With("component", "Firestore"))
+	firestoreStore := store.NewFirestoreClient(fsClient, cfg.StoreCollections, logger.With("component", "Firestore"))
 
 	// 4. Load GitHub Ignore Rules
 	ignoreCfg, err := config.LoadGitHubIgnoreConfig(ignoreFile)

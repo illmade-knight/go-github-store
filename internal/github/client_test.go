@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-github-store/internal/config"
-	"github.com/tinywideclouds/go-github-store/internal/filter"
+
+	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
 )
 
 func newTestLogger() *slog.Logger {
@@ -111,7 +112,8 @@ func TestFetchRepository(t *testing.T) {
 		Exclude: []string{"**/*.json"},
 	}
 
-	files, err := client.FetchRepository(context.Background(), "test-org/test-repo", "main", rules)
+	// Pass `nil` for the sendEvent callback in tests where we aren't asserting on the events
+	files, err := client.FetchRepository(context.Background(), "test-org/test-repo", "main", rules, nil)
 
 	// Assertions
 	require.NoError(t, err)
