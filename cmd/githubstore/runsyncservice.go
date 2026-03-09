@@ -16,10 +16,10 @@ import (
 	"cloud.google.com/go/firestore"
 	"gopkg.in/yaml.v3"
 
-	"github.com/tinywideclouds/go-github-store/internal/config"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-github-store/syncservice"
+	"github.com/tinywideclouds/go-github-store/syncservice/config"
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )

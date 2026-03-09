@@ -3,7 +3,7 @@ package config
 import (
 	"log/slog"
 
-	"github.com/tinywideclouds/go-llm/pkg/cache/v1"
+	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
@@ -53,7 +53,7 @@ func NewConfigFromYaml(baseCfg *YamlConfig, logger *slog.Logger) (*Config, error
 		HTTPListenAddr:     baseCfg.HTTPListenAddr,
 		IdentityServiceURL: baseCfg.IdentityServiceURL,
 		GoogleProjectID:    baseCfg.GoogleProjectID,
-		StoreCollections: cache.StoreCollections{
+		StoreCollections: store.StoreCollections{
 			BundleCollection:   bc,
 			FilesCollection:    fc,
 			ProfilesCollection: pc,

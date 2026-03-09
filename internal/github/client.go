@@ -10,9 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tinywideclouds/go-github-store/internal/config"
-
-	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
+	"github.com/tinywideclouds/go-data-sources/pkg/yaml"
 )
 
 const (
@@ -25,12 +23,12 @@ type Client struct {
 	baseURL      string
 	token        string
 	httpClient   *http.Client
-	ignoreConfig *config.GitHubIgnoreConfig
+	ignoreConfig *GitHubIgnoreConfig
 	logger       *slog.Logger
 }
 
 // NewClient creates a new GitHub API client.
-func NewClient(token string, ignoreConfig *config.GitHubIgnoreConfig, logger *slog.Logger) *Client {
+func NewClient(token string, ignoreConfig *GitHubIgnoreConfig, logger *slog.Logger) *Client {
 	return &Client{
 		baseURL:      defaultGitHubAPI,
 		token:        token,
@@ -183,7 +181,7 @@ func (c *Client) AnalyzeRepository(ctx context.Context, repo, branch string) (*R
 }
 
 // FetchRepository orchestrates fetching the tree and downloading the allowed blobs.
-func (c *Client) FetchRepository(ctx context.Context, repo, branch string, rules *filter.FilterRules, sendEvent func(stage string, details map[string]any)) ([]SyncFile, error) {
+func (c *Client) FetchRepository(ctx context.Context, repo, branch string, rules *yaml.FilterRules, sendEvent func(stage string, details map[string]any)) ([]SyncFile, error) {
 	c.logger.Info("Fetching repository tree for sync", "repo", repo, "requested_branch", branch)
 
 	if sendEvent != nil {

@@ -4,12 +4,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tinywideclouds/go-github-store/internal/config"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 )
 
-func mockIgnoreConfig() *config.GitHubIgnoreConfig {
-	return &config.GitHubIgnoreConfig{
+func mockIgnoreConfig() *github.GitHubIgnoreConfig {
+	return &github.GitHubIgnoreConfig{
 		IgnoredDirs: []string{"node_modules/", "vendor/", ".git/", "build/"},
 		ExtMap: map[string]bool{
 			".png": true, ".pdf": true, ".exe": true,

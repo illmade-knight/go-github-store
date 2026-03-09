@@ -11,60 +11,33 @@ import (
 
 	"github.com/google/uuid"
 
+	datasources "github.com/tinywideclouds/go-data-sources/pkg/v1"
+	"github.com/tinywideclouds/go-data-sources/pkg/yaml"
 	"github.com/tinywideclouds/go-github-store/internal/github"
 	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-microservice-base/pkg/response"
 
-	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
 
-// API holds the injected domain dependencies and handles HTTP requests.
 type API struct {
 	Fetcher github.Fetcher
 	Store   store.Store
 	Logger  *slog.Logger
 }
 
-type CreateCacheRequest struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"` // Optional, will default to main/master via Fetcher
-}
-
-type SyncRequest struct {
-	IngestionRules filter.FilterRules `json:"ingestionRules"`
-}
-
-type SyncResponse struct {
-	CacheID        string `json:"cacheId"`
-	Status         string `json:"status"`
-	FilesProcessed int    `json:"filesProcessed"`
-}
-
-type ProfileRequest struct {
-	Name      string `json:"name"`
-	RulesYaml string `json:"rulesYaml"`
-}
-
 func extractOwnerRepo(input string) string {
-	// Clean up whitespace
 	clean := strings.TrimSpace(input)
-
-	// Strip protocols and domain
 	clean = strings.TrimPrefix(clean, "https://github.com/")
 	clean = strings.TrimPrefix(clean, "http://github.com/")
 	clean = strings.TrimPrefix(clean, "github.com/")
-
-	// Strip trailing git extensions or slashes
 	clean = strings.TrimSuffix(clean, ".git")
 	clean = strings.TrimRight(clean, "/")
-
 	return clean
 }
 
-// CreateCacheHandler handles POST /v1/caches
-// It fetches the repository metadata, creates a skeleton in Firestore, and returns the analysis.
-func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
-	var req CreateCacheRequest
+func (a *API) CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
+	var req datasources.CreateDataSourceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.Logger.Warn("Invalid JSON body received", "error", err)
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
@@ -78,7 +51,6 @@ func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
 
 	cleanRepo := extractOwnerRepo(req.Repo)
 
-	// 1. Analyze the repository via GitHub Git Trees API
 	analysis, err := a.Fetcher.AnalyzeRepository(r.Context(), cleanRepo, req.Branch)
 	if err != nil {
 		a.Logger.Error("Failed to analyze repository", "repo", cleanRepo, "error", err)
@@ -86,57 +58,59 @@ func (a *API) CreateCacheHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Prepare the Cache Skeleton
-	cacheID := "urn:llm:cache:" + uuid.New().String()
-	meta := &store.CacheMetadata{
-		ID:              cacheID,
+	dsIDStr := "urn:data-source:" + uuid.New().String()
+
+	meta := &datasources.DataSourceMetadata{
+		ID:              dsIDStr,
 		Repo:            analysis.Repo,
 		Branch:          analysis.Branch,
-		SyncedCommitSHA: analysis.CommitSHA,
+		SyncedCommitSha: analysis.CommitSHA,
 		Status:          "unsynced",
-		Analysis: store.CacheAnalysis{
-			TotalFiles:     analysis.TotalFiles,
-			TotalSizeBytes: analysis.TotalSizeBytes,
-			Extensions:     analysis.Extensions,
+		FileCount:       0,
+		Analysis: &datasources.DataSourceAnalysis{
+			TotalFiles:     int32(analysis.TotalFiles),
+			TotalSizeBytes: int32(analysis.TotalSizeBytes),
+			Extensions: func() map[string]int32 {
+				m := make(map[string]int32)
+				for k, v := range analysis.Extensions {
+					m[k] = int32(v)
+				}
+				return m
+			}(),
 		},
 	}
 
-	// 3. Save to Firestore
-	if err := a.Store.CreateCache(r.Context(), meta); err != nil {
-		a.Logger.Error("Failed to create cache skeleton", "cacheId", cacheID, "error", err)
-		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist cache skeleton")
+	if err := a.Store.CreateDataSource(r.Context(), meta); err != nil {
+		a.Logger.Error("Failed to create data source skeleton", "dsID", dsIDStr, "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist data source skeleton")
 		return
 	}
 
 	response.WriteJSON(w, http.StatusCreated, meta)
 }
 
-// SyncHandler handles POST /v1/caches/{id}/sync
-// It pulls the skeleton, applies ingestion filters, downloads files, and updates Firestore.
 func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	if cacheID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	var req SyncRequest
-	// We ignore EOF errors here as the body might intentionally be empty if they want to sync everything
+	var req datasources.SyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
 
-	// 1. Fetch the existing Cache Skeleton
-	cache, err := a.Store.GetCache(r.Context(), cacheID)
+	meta, err := a.Store.GetDataSource(r.Context(), dsID)
 	if err != nil {
-		a.Logger.Warn("Cache not found for sync", "cacheId", cacheID)
-		response.WriteJSONError(w, http.StatusNotFound, "Cache not found")
+		a.Logger.Warn("Data Source not found for sync", "dsID", dsID.String())
+		response.WriteJSONError(w, http.StatusNotFound, "Data Source not found")
 		return
 	}
 
-	if cache.Status == "syncing" {
-		response.WriteJSONError(w, http.StatusConflict, "Cache is already currently syncing")
+	if meta.Status == "syncing" {
+		response.WriteJSONError(w, http.StatusConflict, "Data Source is already currently syncing")
 		return
 	}
 
@@ -150,7 +124,6 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// 2. Create a thread-safe progress emitter
 	var streamMu sync.Mutex
 	sendEvent := func(stage string, details map[string]any) {
 		streamMu.Lock()
@@ -159,22 +132,27 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 		payload := map[string]any{"stage": stage, "details": details}
 		bytes, _ := json.Marshal(payload)
 
-		// SSE format requires "data: {json}\n\n"
 		fmt.Fprintf(w, "data: %s\n\n", string(bytes))
 		flusher.Flush()
 	}
 
-	// 3. Start Streaming!
 	sendEvent("init", map[string]any{"message": "Starting sync process..."})
 
-	// 4. Pass the emitter DOWN into the deep domain functions
-	files, err := a.Fetcher.FetchRepository(r.Context(), cache.Repo, cache.Branch, &req.IngestionRules, sendEvent)
-	if err != nil {
+	var domainRules *yaml.FilterRules
+	if req.IngestionRules != nil {
+		domainRules = &yaml.FilterRules{
+			Include: req.IngestionRules.Include,
+			Exclude: req.IngestionRules.Exclude,
+		}
+	}
+
+	files, fetchErr := a.Fetcher.FetchRepository(r.Context(), meta.Repo, meta.Branch, domainRules, sendEvent)
+	if fetchErr != nil {
 		sendEvent("error", map[string]any{"message": "Failed to fetch from GitHub"})
 		return
 	}
 
-	if err := a.Store.SaveSync(r.Context(), cacheID, cache.Repo, cache.Branch, cache.SyncedCommitSHA, files, sendEvent); err != nil {
+	if dbErr := a.Store.SaveSync(r.Context(), dsID, meta.Repo, meta.Branch, meta.SyncedCommitSha, files, sendEvent); dbErr != nil {
 		sendEvent("error", map[string]any{"message": "Failed to save to Firestore"})
 		return
 	}
@@ -182,69 +160,65 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 	sendEvent("complete", map[string]any{"filesProcessed": len(files)})
 }
 
-// ListCachesHandler handles GET /v1/caches
-func (a *API) ListCachesHandler(w http.ResponseWriter, r *http.Request) {
-	caches, err := a.Store.ListCaches(r.Context())
+func (a *API) ListDataSourcesHandler(w http.ResponseWriter, r *http.Request) {
+	sources, err := a.Store.ListDataSources(r.Context())
 	if err != nil {
-		a.Logger.Error("Failed to list caches", "error", err)
-		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve caches")
+		a.Logger.Error("Failed to list data sources", "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve data sources")
 		return
 	}
-	if caches == nil {
-		caches = []store.CacheMetadata{} // Ensure we return [] instead of null
+	if sources == nil {
+		sources = []datasources.DataSourceMetadata{}
 	}
-	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"caches": caches})
+	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"dataSources": sources})
 }
 
-// ListFilesMetadataHandler handles GET /v1/caches/{id}/files
 func (a *API) ListFilesMetadataHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	if cacheID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	files, err := a.Store.ListFilesMetadata(r.Context(), cacheID)
+	files, err := a.Store.ListFilesMetadata(r.Context(), dsID)
 	if err != nil {
-		a.Logger.Error("Failed to list file metadata", "cacheId", cacheID, "error", err)
+		a.Logger.Error("Failed to list file metadata", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve file metadata")
 		return
 	}
 	if files == nil {
-		files = []store.FileMetadata{}
+		files = []datasources.FileMetadata{}
 	}
 	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"files": files})
 }
 
-// ListProfilesHandler handles GET /v1/caches/{id}/profiles
 func (a *API) ListProfilesHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	if cacheID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	profiles, err := a.Store.ListProfiles(r.Context(), cacheID)
+	profiles, err := a.Store.ListProfiles(r.Context(), dsID)
 	if err != nil {
-		a.Logger.Error("Failed to list profiles", "cacheId", cacheID, "error", err)
+		a.Logger.Error("Failed to list profiles", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve profiles")
 		return
 	}
 	if profiles == nil {
-		profiles = []store.Profile{}
+		profiles = []datasources.Profile{}
 	}
 	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"profiles": profiles})
 }
 
-// CreateProfileHandler handles POST /v1/caches/{id}/profiles
 func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	if cacheID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	var req ProfileRequest
+	var req datasources.ProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
@@ -255,22 +229,23 @@ func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use our new isolated filter package for YAML validation
-	if _, err := filter.ParseYAML(req.RulesYaml); err != nil {
+	if _, err := yaml.ParseYAML(req.RulesYaml); err != nil {
 		response.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	profile := &store.Profile{
-		ID:        "urn:llm:profile:" + uuid.New().String(),
+	profileIDStr := "urn:profile:" + uuid.New().String()
+
+	profile := &datasources.Profile{
+		ID:        profileIDStr,
 		Name:      req.Name,
 		RulesYaml: req.RulesYaml,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
-	if err := a.Store.CreateProfile(r.Context(), cacheID, profile); err != nil {
-		a.Logger.Error("Failed to create profile", "cacheId", cacheID, "error", err)
+	if err := a.Store.CreateProfile(r.Context(), dsID, profile); err != nil {
+		a.Logger.Error("Failed to create profile", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to create profile")
 		return
 	}
@@ -278,16 +253,20 @@ func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusCreated, profile)
 }
 
-// UpdateProfileHandler handles PUT /v1/caches/{id}/profiles/{profileId}
 func (a *API) UpdateProfileHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	profileID := r.PathValue("profileId")
-	if cacheID == "" || profileID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID or profile ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	var req ProfileRequest
+	profileID, err := urn.Parse(r.PathValue("profileId"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid profile ID format")
+		return
+	}
+
+	var req datasources.ProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
@@ -298,20 +277,20 @@ func (a *API) UpdateProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := filter.ParseYAML(req.RulesYaml); err != nil {
+	if _, err := yaml.ParseYAML(req.RulesYaml); err != nil {
 		response.WriteJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	profile := &store.Profile{
-		ID:        profileID,
+	profile := &datasources.Profile{
+		ID:        profileID.String(),
 		Name:      req.Name,
 		RulesYaml: req.RulesYaml,
 		UpdatedAt: time.Now(),
 	}
 
-	if err := a.Store.UpdateProfile(r.Context(), cacheID, profile); err != nil {
-		a.Logger.Error("Failed to update profile", "profileId", profileID, "error", err)
+	if err := a.Store.UpdateProfile(r.Context(), dsID, profile); err != nil {
+		a.Logger.Error("Failed to update profile", "profileId", profileID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to update profile")
 		return
 	}
@@ -319,17 +298,21 @@ func (a *API) UpdateProfileHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusOK, profile)
 }
 
-// DeleteProfileHandler handles DELETE /v1/caches/{id}/profiles/{profileId}
 func (a *API) DeleteProfileHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	profileID := r.PathValue("profileId")
-	if cacheID == "" || profileID == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID or profile ID")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	if err := a.Store.DeleteProfile(r.Context(), cacheID, profileID); err != nil {
-		a.Logger.Error("Failed to delete profile", "profileId", profileID, "error", err)
+	profileID, err := urn.Parse(r.PathValue("profileId"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid profile ID format")
+		return
+	}
+
+	if err := a.Store.DeleteProfile(r.Context(), dsID, profileID); err != nil {
+		a.Logger.Error("Failed to delete profile", "profileId", profileID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to delete profile")
 		return
 	}
@@ -337,24 +320,26 @@ func (a *API) DeleteProfileHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// GetFileContentHandler handles GET /v1/caches/{id}/files/{base64Path}/content
 func (a *API) GetFileContentHandler(w http.ResponseWriter, r *http.Request) {
-	cacheID := r.PathValue("id")
-	base64Path := r.PathValue("base64Path")
-
-	if cacheID == "" || base64Path == "" {
-		response.WriteJSONError(w, http.StatusBadRequest, "Missing cache ID or base64 file path")
+	dsID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
 
-	content, err := a.Store.GetFileContent(r.Context(), cacheID, base64Path)
+	base64Path := r.PathValue("base64Path")
+	if base64Path == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "Missing base64 file path")
+		return
+	}
+
+	content, err := a.Store.GetFileContent(r.Context(), dsID, base64Path)
 	if err != nil {
-		a.Logger.Error("Failed to fetch file content", "cacheId", cacheID, "docId", base64Path, "error", err)
+		a.Logger.Error("Failed to fetch file content", "dsID", dsID.String(), "docId", base64Path, "error", err)
 		response.WriteJSONError(w, http.StatusNotFound, "File not found or unreadable")
 		return
 	}
 
-	// Wrap in JSON for safe, predictable frontend parsing
 	response.WriteJSON(w, http.StatusOK, map[string]string{
 		"content": content,
 	})

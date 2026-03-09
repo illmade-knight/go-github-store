@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/tinywideclouds/go-llm/pkg/cache/v1"
+	"github.com/tinywideclouds/go-github-store/internal/store"
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
@@ -16,7 +16,7 @@ type Config struct {
 	GoogleProjectID    string
 	IdentityServiceURL string
 
-	StoreCollections cache.StoreCollections
+	StoreCollections store.StoreCollections
 	// CorsConfig is the processed, ready-to-use middleware config.
 	CorsConfig middleware.CorsConfig
 

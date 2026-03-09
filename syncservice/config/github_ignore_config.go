@@ -3,22 +3,13 @@ package config
 import (
 	"fmt"
 	"gopkg.in/yaml.v3"
+
+	"github.com/tinywideclouds/go-github-store/internal/github"
 )
 
-// GitHubIgnoreConfig holds the rules for filtering out irrelevant files during ingestion.
-type GitHubIgnoreConfig struct {
-	IgnoredDirs       []string `yaml:"ignored_dirs"`
-	IgnoredExtensions []string `yaml:"ignored_extensions"`
-	IgnoredFiles      []string `yaml:"ignored_files"`
-
-	// Fast lookup maps generated after unmarshaling
-	ExtMap  map[string]bool `yaml:"-"`
-	FileMap map[string]bool `yaml:"-"`
-}
-
 // LoadGitHubIgnoreConfig parses the raw YAML bytes and builds the O(1) lookup maps.
-func LoadGitHubIgnoreConfig(data []byte) (*GitHubIgnoreConfig, error) {
-	var cfg GitHubIgnoreConfig
+func LoadGitHubIgnoreConfig(data []byte) (*github.GitHubIgnoreConfig, error) {
+	var cfg github.GitHubIgnoreConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse github ignore yaml: %w", err)
 	}

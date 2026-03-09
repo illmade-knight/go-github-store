@@ -12,17 +12,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tinywideclouds/go-github-store/internal/config"
 
-	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
+	"github.com/tinywideclouds/go-data-sources/pkg/yaml"
 )
 
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func mockIgnoreConfig() *config.GitHubIgnoreConfig {
-	return &config.GitHubIgnoreConfig{
+func mockIgnoreConfig() *GitHubIgnoreConfig {
+	return &GitHubIgnoreConfig{
 		IgnoredDirs: []string{"node_modules/"},
 		ExtMap:      map[string]bool{".png": true},
 		FileMap:     map[string]bool{"package-lock.json": true},
@@ -108,7 +107,7 @@ func TestFetchRepository(t *testing.T) {
 	client.baseURL = ts.URL
 
 	// Execute Fetch with Dynamic Ingestion Rules (Exclude .json files)
-	rules := &filter.FilterRules{
+	rules := &yaml.FilterRules{
 		Exclude: []string{"**/*.json"},
 	}
 

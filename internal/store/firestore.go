@@ -8,60 +8,86 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+
+	datasources "github.com/tinywideclouds/go-data-sources/pkg/v1"
 	"github.com/tinywideclouds/go-github-store/internal/file"
 	"github.com/tinywideclouds/go-github-store/internal/github"
-	"github.com/tinywideclouds/go-llm/pkg/cache/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"google.golang.org/api/iterator"
 )
 
 type FirestoreClient struct {
 	client *firestore.Client
-	c      cache.StoreCollections
+	c      StoreCollections
 	logger *slog.Logger
 }
 
 const MaxBatchSize = 500
 
-func NewFirestoreClient(client *firestore.Client, storeCollections cache.StoreCollections, logger *slog.Logger) *FirestoreClient {
-	return &FirestoreClient{client: client, c: storeCollections, logger: logger}
+func NewFirestoreClient(client *firestore.Client, collections StoreCollections, logger *slog.Logger) *FirestoreClient {
+	return &FirestoreClient{client: client, c: collections, logger: logger}
 }
 
-// Close gracefully shuts down the underlying Firestore client connection.
 func (s *FirestoreClient) Close() error {
 	s.logger.Info("Closing Firestore connection")
 	return s.client.Close()
 }
 
-// GenerateDocID creates a safe Firestore document ID from a file path.
 func GenerateDocID(path string) string {
 	return base64.URLEncoding.EncodeToString([]byte(path))
 }
 
-// GetCache retrieves a single cache bundle's metadata.
-func (s *FirestoreClient) GetCache(ctx context.Context, cacheID string) (*CacheMetadata, error) {
-	doc, err := s.client.Collection(s.c.BundleCollection).Doc(cacheID).Get(ctx)
+// --- DATA SOURCE METADATA ---
+
+func (s *FirestoreClient) GetDataSource(ctx context.Context, dsID urn.URN) (*datasources.DataSourceMetadata, error) {
+	doc, err := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get cache document: %w", err)
+		return nil, fmt.Errorf("failed to get data source document: %w", err)
 	}
 
-	var meta CacheMetadata
+	var meta BundleMetadata
 	if err := doc.DataTo(&meta); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cache metadata: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal internal metadata: %w", err)
 	}
-	meta.ID = doc.Ref.ID
-	return &meta, nil
+
+	lastSynced := time.Time{}
+	if meta.LastSyncedAt > 0 {
+		lastSynced = time.Unix(meta.LastSyncedAt, 0)
+	}
+
+	domainMeta := &datasources.DataSourceMetadata{
+		ID:              dsID.String(),
+		Repo:            meta.Repo,
+		Branch:          meta.Branch,
+		SyncedCommitSha: meta.SyncedCommitSHA,
+		FileCount:       meta.FileCount,
+		Status:          meta.Status,
+		Analysis:        &meta.Analysis,
+		LastSyncedAt:    lastSynced,
+	}
+
+	return domainMeta, nil
 }
 
-// CreateCache saves the initial skeleton and analysis to Firestore.
-func (s *FirestoreClient) CreateCache(ctx context.Context, meta *CacheMetadata) error {
-	// We explicitly omit meta.ID in the struct tags, so we use it as the path here
+func (s *FirestoreClient) CreateDataSource(ctx context.Context, meta *datasources.DataSourceMetadata) error {
 	ref := s.client.Collection(s.c.BundleCollection).Doc(meta.ID)
-	_, err := ref.Set(ctx, meta)
+
+	dbMeta := BundleMetadata{
+		Repo:      meta.Repo,
+		Branch:    meta.Branch,
+		Status:    meta.Status,
+		FileCount: meta.FileCount,
+	}
+	if meta.Analysis != nil {
+		dbMeta.Analysis = *meta.Analysis
+	}
+
+	_, err := ref.Set(ctx, dbMeta)
 	return err
 }
 
-func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error {
-	s.logger.Info("Starting Firestore sync", "cacheID", cacheID, "incoming_files", len(files))
+func (s *FirestoreClient) SaveSync(ctx context.Context, dsID urn.URN, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error {
+	s.logger.Info("Starting Firestore sync", "dsID", dsID.String(), "incoming_files", len(files))
 
 	if sendEvent != nil {
 		sendEvent("db_sync_start", map[string]any{
@@ -70,10 +96,9 @@ func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch, c
 		})
 	}
 
-	bundleRef := s.client.Collection(s.c.BundleCollection).Doc(cacheID)
+	bundleRef := s.client.Collection(s.c.BundleCollection).Doc(dsID.String())
 	filesRef := bundleRef.Collection(s.c.FilesCollection)
 
-	// 1. Fetch existing metadata to compute diff
 	existingFiles := make(map[string]file.ExistingFile)
 	iter := filesRef.Select("path", "hash").Documents(ctx)
 	for {
@@ -94,7 +119,6 @@ func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch, c
 		}
 	}
 
-	// 2. Delegate to the pure Diffing domain
 	diff := file.CalculateDiff(existingFiles, files)
 	s.logger.Info("Diff calculated", "to_write", len(diff.ToWrite), "to_delete", len(diff.ToDelete))
 
@@ -106,7 +130,6 @@ func (s *FirestoreClient) SaveSync(ctx context.Context, cacheID, repo, branch, c
 		})
 	}
 
-	// We only update the sync-related fields to avoid overwriting the Analysis
 	updates := map[string]interface{}{
 		"syncedCommitSha": commitSHA,
 		"lastSyncedAt":    time.Now().Unix(),
@@ -121,7 +144,6 @@ func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firesto
 	batch := s.client.Batch()
 	opCount := 0
 
-	// Use MergeAll to protect the existing Analysis payload from being erased
 	batch.Set(bundleRef, updates, firestore.MergeAll)
 	opCount++
 
@@ -139,7 +161,7 @@ func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firesto
 		docData := FileDoc{
 			Path:      f.Path,
 			Content:   f.Content,
-			SizeBytes: f.SizeBytes,
+			SizeBytes: int32(f.SizeBytes),
 			Status:    f.Status,
 			Extension: f.Extension,
 			Hash:      file.GenerateHash(f.Content),
@@ -174,11 +196,10 @@ func (s *FirestoreClient) executeBatches(ctx context.Context, bundleRef *firesto
 	return nil
 }
 
-// ListCaches retrieves all synced repository bundles.
-func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, error) {
-	s.logger.Debug("Executing Firestore query for CacheBundles", "collection", s.c.BundleCollection)
+func (s *FirestoreClient) ListDataSources(ctx context.Context) ([]datasources.DataSourceMetadata, error) {
+	s.logger.Debug("Executing Firestore query for Data Sources", "collection", s.c.BundleCollection)
 
-	var caches []CacheMetadata
+	var sources []datasources.DataSourceMetadata
 	iter := s.client.Collection(s.c.BundleCollection).OrderBy("lastSyncedAt", firestore.Desc).Documents(ctx)
 
 	for {
@@ -188,35 +209,46 @@ func (s *FirestoreClient) ListCaches(ctx context.Context) ([]CacheMetadata, erro
 		}
 		if err != nil {
 			s.logger.Error("Firestore iteration failed", "error", err)
-			return nil, fmt.Errorf("failed to iterate caches: %w", err)
+			return nil, fmt.Errorf("failed to iterate data sources: %w", err)
 		}
 
-		var cache CacheMetadata
-		if err := doc.DataTo(&cache); err != nil {
-			s.logger.Warn("Failed to unmarshal cache metadata", "docID", doc.Ref.ID, "error", err)
+		var meta BundleMetadata
+		if err := doc.DataTo(&meta); err != nil {
+			s.logger.Warn("Failed to unmarshal data source metadata", "docID", doc.Ref.ID, "error", err)
 			continue
 		}
-		cache.ID = doc.Ref.ID
-		caches = append(caches, cache)
+
+		lastSynced := time.Time{}
+		if meta.LastSyncedAt > 0 {
+			lastSynced = time.Unix(meta.LastSyncedAt, 0)
+		}
+
+		sources = append(sources, datasources.DataSourceMetadata{
+			ID:              doc.Ref.ID,
+			Repo:            meta.Repo,
+			Branch:          meta.Branch,
+			SyncedCommitSha: meta.SyncedCommitSHA,
+			FileCount:       meta.FileCount,
+			Status:          meta.Status,
+			Analysis:        &meta.Analysis,
+			LastSyncedAt:    lastSynced,
+		})
 	}
 
-	s.logger.Info("Successfully retrieved caches", "count", len(caches))
+	s.logger.Info("Successfully retrieved data sources", "count", len(sources))
 
-	if caches == nil {
-		s.logger.Debug("No caches found, returning empty array")
-		return []CacheMetadata{}, nil
+	if sources == nil {
+		s.logger.Debug("No data sources found, returning empty array")
+		return []datasources.DataSourceMetadata{}, nil
 	}
 
-	return caches, nil
+	return sources, nil
 }
 
-// ListFilesMetadata retrieves the files for a cache WITHOUT the heavy content payload.
-func (s *FirestoreClient) ListFilesMetadata(ctx context.Context, cacheID string) ([]FileMetadata, error) {
-	var files []FileMetadata
+func (s *FirestoreClient) ListFilesMetadata(ctx context.Context, dsID urn.URN) ([]datasources.FileMetadata, error) {
+	var files []datasources.FileMetadata
 
-	// STRICT PROJECTION: Only request the lightweight fields.
-	// This prevents crashing the Go service when scanning 1,000+ files.
-	iter := s.client.Collection(s.c.BundleCollection).Doc(cacheID).
+	iter := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).
 		Collection(s.c.FilesCollection).
 		Select("path", "sizeBytes", "extension").
 		Documents(ctx)
@@ -230,7 +262,7 @@ func (s *FirestoreClient) ListFilesMetadata(ctx context.Context, cacheID string)
 			return nil, fmt.Errorf("failed to list file metadata: %w", err)
 		}
 
-		var meta FileMetadata
+		var meta datasources.FileMetadata
 		if err := doc.DataTo(&meta); err != nil {
 			s.logger.Warn("Failed to unmarshal file metadata", "docID", doc.Ref.ID, "error", err)
 			continue
@@ -242,9 +274,9 @@ func (s *FirestoreClient) ListFilesMetadata(ctx context.Context, cacheID string)
 
 // --- Profile Management ---
 
-func (s *FirestoreClient) ListProfiles(ctx context.Context, cacheID string) ([]Profile, error) {
-	var profiles []Profile
-	iter := s.client.Collection(s.c.BundleCollection).Doc(cacheID).Collection(s.c.ProfilesCollection).Documents(ctx)
+func (s *FirestoreClient) ListProfiles(ctx context.Context, dsID urn.URN) ([]datasources.Profile, error) {
+	var profiles []datasources.Profile
+	iter := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).Collection(s.c.ProfilesCollection).Documents(ctx)
 
 	for {
 		doc, err := iter.Next()
@@ -255,7 +287,7 @@ func (s *FirestoreClient) ListProfiles(ctx context.Context, cacheID string) ([]P
 			return nil, fmt.Errorf("failed to list profiles: %w", err)
 		}
 
-		var p Profile
+		var p datasources.Profile
 		if err := doc.DataTo(&p); err != nil {
 			s.logger.Warn("Failed to unmarshal profile", "docID", doc.Ref.ID, "error", err)
 			continue
@@ -266,28 +298,27 @@ func (s *FirestoreClient) ListProfiles(ctx context.Context, cacheID string) ([]P
 	return profiles, nil
 }
 
-func (s *FirestoreClient) CreateProfile(ctx context.Context, cacheID string, profile *Profile) error {
-	ref := s.client.Collection(s.c.BundleCollection).Doc(cacheID).Collection(s.c.ProfilesCollection).Doc(profile.ID)
+func (s *FirestoreClient) CreateProfile(ctx context.Context, dsID urn.URN, profile *datasources.Profile) error {
+	ref := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).Collection(s.c.ProfilesCollection).Doc(profile.ID)
 	_, err := ref.Set(ctx, profile)
 	return err
 }
 
-func (s *FirestoreClient) UpdateProfile(ctx context.Context, cacheID string, profile *Profile) error {
-	ref := s.client.Collection(s.c.BundleCollection).Doc(cacheID).Collection(s.c.ProfilesCollection).Doc(profile.ID)
+func (s *FirestoreClient) UpdateProfile(ctx context.Context, dsID urn.URN, profile *datasources.Profile) error {
+	ref := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).Collection(s.c.ProfilesCollection).Doc(profile.ID)
 	_, err := ref.Set(ctx, profile, firestore.MergeAll)
 	return err
 }
 
-func (s *FirestoreClient) DeleteProfile(ctx context.Context, cacheID, profileID string) error {
-	ref := s.client.Collection(s.c.BundleCollection).Doc(cacheID).Collection(s.c.ProfilesCollection).Doc(profileID)
+func (s *FirestoreClient) DeleteProfile(ctx context.Context, dsID, profileID urn.URN) error {
+	ref := s.client.Collection(s.c.BundleCollection).Doc(dsID.String()).Collection(s.c.ProfilesCollection).Doc(profileID.String())
 	_, err := ref.Delete(ctx)
 	return err
 }
 
-// GetFileContent performs a direct O(1) lookup of a specific file document and returns only its text content.
-func (s *FirestoreClient) GetFileContent(ctx context.Context, cacheID string, docID string) (string, error) {
+func (s *FirestoreClient) GetFileContent(ctx context.Context, dsID urn.URN, docID string) (string, error) {
 	doc, err := s.client.Collection(s.c.BundleCollection).
-		Doc(cacheID).
+		Doc(dsID.String()).
 		Collection(s.c.FilesCollection).
 		Doc(docID).
 		Get(ctx)

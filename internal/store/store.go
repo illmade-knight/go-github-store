@@ -2,86 +2,51 @@ package store
 
 import (
 	"context"
-	"time"
 
+	datasources "github.com/tinywideclouds/go-data-sources/pkg/v1"
 	"github.com/tinywideclouds/go-github-store/internal/github"
-	"github.com/tinywideclouds/go-llm/pkg/yaml/filter"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
 
-// Profile represents a saved filter configuration for a specific cache bundle.
-type Profile struct {
-	ID        string    `json:"id" firestore:"-"`
-	Name      string    `json:"name" firestore:"name"`
-	RulesYaml string    `json:"rulesYaml" firestore:"rulesYaml"`
-	CreatedAt time.Time `json:"createdAt" firestore:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt" firestore:"updatedAt"`
-}
+// --- INTERNAL FIRESTORE MODELS ---
 
-// CacheAnalysis holds the pre-sync metadata calculated from the GitHub tree.
-type CacheAnalysis struct {
-	TotalFiles     int            `json:"totalFiles" firestore:"totalFiles"`
-	TotalSizeBytes int            `json:"totalSizeBytes" firestore:"totalSizeBytes"`
-	Extensions     map[string]int `json:"extensions" firestore:"extensions"`
-}
-
-// CacheMetadata represents the summary of a synced repository.
-type CacheMetadata struct {
-	ID              string        `json:"id" firestore:"-"`
-	Repo            string        `json:"repo" firestore:"repo"`
-	Branch          string        `json:"branch" firestore:"branch"`
-	SyncedCommitSHA string        `json:"syncedCommitSha" firestore:"syncedCommitSha"` // Used for drift checking
-	LastSyncedAt    int64         `json:"lastSyncedAt" firestore:"lastSyncedAt"`
-	FileCount       int           `json:"fileCount" firestore:"fileCount"`
-	Status          string        `json:"status" firestore:"status"` // e.g., "unsynced", "syncing", "ready", "failed"
-	Analysis        CacheAnalysis `json:"analysis" firestore:"analysis"`
-}
-
-// FileMetadata represents a file without its heavy content payload.
-type FileMetadata struct {
-	Path      string `json:"path" firestore:"path"`
-	SizeBytes int    `json:"sizeBytes" firestore:"sizeBytes"`
-	Extension string `json:"extension" firestore:"extension"`
-}
-
-// BundleMetadata is the internal Firestore representation of the root cache document.
+// BundleMetadata is the strict internal representation for Firestore
 type BundleMetadata struct {
-	Repo            string             `firestore:"repo"`
-	Branch          string             `firestore:"branch"`
-	SyncedCommitSHA string             `firestore:"syncedCommitSha"`
-	LastSyncedAt    int64              `firestore:"lastSyncedAt"`
-	FileCount       int                `firestore:"fileCount"`
-	Status          string             `firestore:"status"`
-	Analysis        CacheAnalysis      `firestore:"analysis"`
-	IngestionRules  filter.FilterRules `firestore:"ingestionRules"`
+	Repo            string                         `firestore:"repo"`
+	Branch          string                         `firestore:"branch"`
+	SyncedCommitSHA string                         `firestore:"syncedCommitSha"`
+	LastSyncedAt    int64                          `firestore:"lastSyncedAt"`
+	FileCount       int32                          `firestore:"fileCount"`
+	Status          string                         `firestore:"status"`
+	Analysis        datasources.DataSourceAnalysis `firestore:"analysis"`
 }
 
 type FileDoc struct {
 	Path      string `firestore:"path"`
 	Content   string `firestore:"content"`
-	SizeBytes int    `firestore:"sizeBytes"`
+	SizeBytes int32  `firestore:"sizeBytes"`
 	Status    string `firestore:"status"`
 	Extension string `firestore:"extension"`
 	Hash      string `firestore:"hash"`
 }
 
-// Store defines the agnostic contract for persisting and reading repository data.
+// Store defines the agnostic contract for persisting Data Sources.
 type Store interface {
 	// Write Operations
-
-	SaveSync(ctx context.Context, cacheID, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error
-	CreateCache(ctx context.Context, meta *CacheMetadata) error
+	SaveSync(ctx context.Context, dsID urn.URN, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error
+	CreateDataSource(ctx context.Context, meta *datasources.DataSourceMetadata) error
 
 	// Read Operations
-	GetCache(ctx context.Context, cacheID string) (*CacheMetadata, error)
-	ListCaches(ctx context.Context) ([]CacheMetadata, error)
-	ListFilesMetadata(ctx context.Context, cacheID string) ([]FileMetadata, error)
-	GetFileContent(ctx context.Context, cacheID string, docID string) (string, error)
+	GetDataSource(ctx context.Context, dsID urn.URN) (*datasources.DataSourceMetadata, error)
+	ListDataSources(ctx context.Context) ([]datasources.DataSourceMetadata, error)
+	ListFilesMetadata(ctx context.Context, dsID urn.URN) ([]datasources.FileMetadata, error)
+	GetFileContent(ctx context.Context, dsID urn.URN, docID string) (string, error)
 
 	// Profile Management
-	ListProfiles(ctx context.Context, cacheID string) ([]Profile, error)
-	CreateProfile(ctx context.Context, cacheID string, profile *Profile) error
-	UpdateProfile(ctx context.Context, cacheID string, profile *Profile) error
-	DeleteProfile(ctx context.Context, cacheID, profileID string) error
+	ListProfiles(ctx context.Context, dsID urn.URN) ([]datasources.Profile, error)
+	CreateProfile(ctx context.Context, dsID urn.URN, profile *datasources.Profile) error
+	UpdateProfile(ctx context.Context, dsID urn.URN, profile *datasources.Profile) error
+	DeleteProfile(ctx context.Context, dsID, profileID urn.URN) error
 
 	// Lifecycle Management
 	Close() error
