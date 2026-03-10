@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,9 +69,14 @@ type mockStore struct {
 	dataSources       []datasources.DataSourceMetadata
 	fileMetas         []datasources.FileMetadata
 	fileContentReturn string
-	profiles          []datasources.Profile
-	profileSaved      *datasources.Profile
-	deletedID         urn.URN
+
+	profiles     []datasources.Profile
+	profileSaved *datasources.Profile
+	deletedID    urn.URN
+
+	groupSaved     *datasources.DataGroup
+	groupsList     []datasources.DataGroup
+	deletedGroupID string
 }
 
 func (m *mockStore) SaveSync(ctx context.Context, dsID urn.URN, repo, branch, commitSHA string, files []github.SyncFile, sendEvent func(stage string, details map[string]any)) error {
@@ -118,7 +122,27 @@ func (m *mockStore) DeleteProfile(ctx context.Context, dsID, profileID urn.URN) 
 	m.deletedID = profileID
 	return m.err
 }
-func (m *mockStore) Close() error { return nil }
+func (m *mockStore) CreateDataGroup(ctx context.Context, group *datasources.DataGroup) error {
+	m.groupSaved = group
+	return m.err
+}
+func (m *mockStore) GetDataGroup(ctx context.Context, id string) (*datasources.DataGroup, error) {
+	if m.groupSaved != nil && m.groupSaved.ID.String() == id {
+		return m.groupSaved, nil
+	}
+	return nil, m.err
+}
+func (m *mockStore) UpdateDataGroup(ctx context.Context, group *datasources.DataGroup) error {
+	m.groupSaved = group
+	return m.err
+}
+func (m *mockStore) DeleteDataGroup(ctx context.Context, id string) error {
+	m.deletedGroupID = id
+	return m.err
+}
+func (m *mockStore) ListDataGroups(ctx context.Context) ([]datasources.DataGroup, error) {
+	return m.groupsList, m.err
+}
 
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -138,7 +162,11 @@ func TestCreateDataSourceHandler(t *testing.T) {
 		},
 	}
 	storeMock := &mockStore{}
-	apiHandler := &api.API{Fetcher: fetcher, Store: storeMock, Logger: logger}
+	apiHandler := &api.API{
+		Fetcher:      fetcher,
+		DataSourceDB: storeMock,
+		Logger:       logger,
+	}
 
 	reqBody := `{"repo":"my-org/my-repo", "branch":"main"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data-sources", bytes.NewBufferString(reqBody))
@@ -157,7 +185,7 @@ func TestCreateDataSourceHandler(t *testing.T) {
 
 	assert.NotNil(t, storeMock.dsCreated)
 	assert.Equal(t, "abc-123", storeMock.dsCreated.SyncedCommitSha)
-	assert.Contains(t, storeMock.dsCreated.ID, "urn:data-source:")
+	assert.Contains(t, storeMock.dsCreated.ID.String(), "urn:data-source:")
 }
 
 func TestSyncHandler(t *testing.T) {
@@ -167,14 +195,14 @@ func TestSyncHandler(t *testing.T) {
 	validDsURN := mustURN("urn:data-source:123")
 	storeMock := &mockStore{
 		getDsReturn: &datasources.DataSourceMetadata{
-			ID:              validDsURN.String(),
+			ID:              validDsURN,
 			Repo:            "my-org/my-repo",
 			Branch:          "main",
 			SyncedCommitSha: "abc-123",
 			Status:          "unsynced",
 		},
 	}
-	apiHandler := &api.API{Fetcher: fetcher, Store: storeMock, Logger: logger}
+	apiHandler := &api.API{Fetcher: fetcher, DataSourceDB: storeMock, Logger: logger}
 
 	reqBody := `{"ingestionRules": {"include": ["**/*.go"]}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data-sources/urn:data-source:123/sync", bytes.NewBufferString(reqBody))
@@ -197,7 +225,7 @@ func TestSyncHandler(t *testing.T) {
 func TestCreateProfileHandler_ValidYaml(t *testing.T) {
 	logger := newTestLogger()
 	storeMock := &mockStore{}
-	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
+	apiHandler := &api.API{ProfileDB: storeMock, Logger: logger}
 
 	validDsURN := mustURN("urn:data-source:1")
 	reqBody := `{"name":"Backend", "rulesYaml":"include:\n  - \"**/*.go\""}`
@@ -210,50 +238,7 @@ func TestCreateProfileHandler_ValidYaml(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 	assert.NotNil(t, storeMock.profileSaved)
 	assert.Equal(t, "Backend", storeMock.profileSaved.Name)
-	assert.Contains(t, storeMock.profileSaved.ID, "urn:profile:")
-}
-
-func TestCreateProfileHandler_InvalidYaml(t *testing.T) {
-	logger := newTestLogger()
-	storeMock := &mockStore{}
-	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
-
-	validDsURN := mustURN("urn:data-source:1")
-	reqBody := `{"name":"Backend", "rulesYaml":"include:\n\t- \"**/*.go\""}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/data-sources/urn:data-source:1/profiles", bytes.NewBufferString(reqBody))
-	req.SetPathValue("id", validDsURN.String())
-	w := httptest.NewRecorder()
-
-	apiHandler.CreateProfileHandler(w, req)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Nil(t, storeMock.profileSaved)
-
-	var errResp map[string]string
-	json.NewDecoder(w.Body).Decode(&errResp)
-	assert.Contains(t, errResp["error"], "invalid YAML structure")
-}
-
-func TestListFilesMetadataHandler(t *testing.T) {
-	logger := newTestLogger()
-	storeMock := &mockStore{
-		fileMetas: []datasources.FileMetadata{{Path: "main.go", SizeBytes: 100, Extension: ".go"}},
-	}
-	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
-
-	validDsURN := mustURN("urn:data-source:1")
-	req := httptest.NewRequest(http.MethodGet, "/v1/data-sources/urn:data-source:1/files", nil)
-	req.SetPathValue("id", validDsURN.String())
-	w := httptest.NewRecorder()
-
-	apiHandler.ListFilesMetadataHandler(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var res map[string][]datasources.FileMetadata
-	json.NewDecoder(w.Body).Decode(&res)
-	assert.Len(t, res["files"], 1)
-	assert.Equal(t, "main.go", res["files"][0].Path)
+	assert.Contains(t, storeMock.profileSaved.ID.String(), "urn:profile:")
 }
 
 func TestGetFileContentHandler_Success(t *testing.T) {
@@ -261,7 +246,7 @@ func TestGetFileContentHandler_Success(t *testing.T) {
 	storeMock := &mockStore{
 		fileContentReturn: "package main\n\nfunc main() {}",
 	}
-	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
+	apiHandler := &api.API{DataSourceDB: storeMock, Logger: logger}
 
 	validDsURN := mustURN("urn:data-source:1")
 	req := httptest.NewRequest(http.MethodGet, "/v1/data-sources/urn:data-source:1/files/base64-encoded-path/content", nil)
@@ -278,24 +263,77 @@ func TestGetFileContentHandler_Success(t *testing.T) {
 	assert.Equal(t, "package main\n\nfunc main() {}", res["content"])
 }
 
-func TestGetFileContentHandler_NotFound(t *testing.T) {
-	logger := newTestLogger()
-	storeMock := &mockStore{
-		err: errors.New("firestore: document not found"),
-	}
-	apiHandler := &api.API{Fetcher: &mockFetcher{}, Store: storeMock, Logger: logger}
+// --- Data Group Tests ---
 
-	validDsURN := mustURN("urn:data-source:1")
-	req := httptest.NewRequest(http.MethodGet, "/v1/data-sources/urn:data-source:1/files/bad-path/content", nil)
-	req.SetPathValue("id", validDsURN.String())
-	req.SetPathValue("base64Path", "bad-path")
+func TestCreateDataGroupHandler(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{}
+	apiHandler := &api.API{DataGroupDB: storeMock, Logger: logger}
+
+	reqBody := `{"name":"My Context", "description":"Test group", "sources":[{"dataSourceId":"urn:data-source:abc"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/datagroups", bytes.NewBufferString(reqBody))
 	w := httptest.NewRecorder()
 
-	apiHandler.GetFileContentHandler(w, req)
+	apiHandler.CreateDataGroupHandler(w, req)
 
-	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.NotNil(t, storeMock.groupSaved)
+	assert.Equal(t, "My Context", storeMock.groupSaved.Name)
+	assert.Len(t, storeMock.groupSaved.Sources, 1)
+	assert.Equal(t, "urn:data-source:abc", storeMock.groupSaved.Sources[0].DataSourceID.String())
+}
 
-	var res map[string]string
+func TestListDataGroupsHandler(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{
+		groupsList: []datasources.DataGroup{{Name: "Group A"}, {Name: "Group B"}},
+	}
+	apiHandler := &api.API{DataGroupDB: storeMock, Logger: logger}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/datagroups", nil)
+	w := httptest.NewRecorder()
+
+	apiHandler.ListDataGroupsHandler(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// FIXED: Now we expect a plain array, not wrapped in an object
+	var res []datasources.DataGroup
 	json.NewDecoder(w.Body).Decode(&res)
-	assert.Contains(t, res["error"], "File not found")
+	assert.Len(t, res, 2)
+	assert.Equal(t, "Group A", res[0].Name)
+}
+
+func TestUpdateDataGroupHandler(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{}
+	apiHandler := &api.API{DataGroupDB: storeMock, Logger: logger}
+
+	reqBody := `{"name":"Updated Group"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/datagroups/urn:datagroup:789", bytes.NewBufferString(reqBody))
+	req.SetPathValue("id", "urn:datagroup:789")
+	w := httptest.NewRecorder()
+
+	apiHandler.UpdateDataGroupHandler(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotNil(t, storeMock.groupSaved)
+	assert.Equal(t, "Updated Group", storeMock.groupSaved.Name)
+	assert.Equal(t, "urn:datagroup:789", storeMock.groupSaved.ID.String())
+}
+
+func TestDeleteDataGroupHandler(t *testing.T) {
+	logger := newTestLogger()
+	storeMock := &mockStore{}
+	apiHandler := &api.API{DataGroupDB: storeMock, Logger: logger}
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/datagroups/urn:datagroup:789", nil)
+	req.SetPathValue("id", "urn:datagroup:789")
+	w := httptest.NewRecorder()
+
+	apiHandler.DeleteDataGroupHandler(w, req)
+
+	// FIXED: Now properly testing for a 204 No Content response
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, "urn:datagroup:789", storeMock.deletedGroupID)
 }

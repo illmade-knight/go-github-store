@@ -21,9 +21,11 @@ import (
 )
 
 type API struct {
-	Fetcher github.Fetcher
-	Store   store.Store
-	Logger  *slog.Logger
+	Fetcher      github.Fetcher
+	DataSourceDB store.DataSourceStore
+	ProfileDB    store.ProfileStore
+	DataGroupDB  store.DataGroupStore
+	Logger       *slog.Logger
 }
 
 func extractOwnerRepo(input string) string {
@@ -59,9 +61,10 @@ func (a *API) CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dsIDStr := "urn:data-source:" + uuid.New().String()
+	dsURN, _ := urn.Parse(dsIDStr)
 
 	meta := &datasources.DataSourceMetadata{
-		ID:              dsIDStr,
+		ID:              dsURN,
 		Repo:            analysis.Repo,
 		Branch:          analysis.Branch,
 		SyncedCommitSha: analysis.CommitSHA,
@@ -80,7 +83,7 @@ func (a *API) CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	if err := a.Store.CreateDataSource(r.Context(), meta); err != nil {
+	if err := a.DataSourceDB.CreateDataSource(r.Context(), meta); err != nil {
 		a.Logger.Error("Failed to create data source skeleton", "dsID", dsIDStr, "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist data source skeleton")
 		return
@@ -102,7 +105,7 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	meta, err := a.Store.GetDataSource(r.Context(), dsID)
+	meta, err := a.DataSourceDB.GetDataSource(r.Context(), dsID)
 	if err != nil {
 		a.Logger.Warn("Data Source not found for sync", "dsID", dsID.String())
 		response.WriteJSONError(w, http.StatusNotFound, "Data Source not found")
@@ -152,7 +155,7 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dbErr := a.Store.SaveSync(r.Context(), dsID, meta.Repo, meta.Branch, meta.SyncedCommitSha, files, sendEvent); dbErr != nil {
+	if dbErr := a.DataSourceDB.SaveSync(r.Context(), dsID, meta.Repo, meta.Branch, meta.SyncedCommitSha, files, sendEvent); dbErr != nil {
 		sendEvent("error", map[string]any{"message": "Failed to save to Firestore"})
 		return
 	}
@@ -161,7 +164,7 @@ func (a *API) SyncHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) ListDataSourcesHandler(w http.ResponseWriter, r *http.Request) {
-	sources, err := a.Store.ListDataSources(r.Context())
+	sources, err := a.DataSourceDB.ListDataSources(r.Context())
 	if err != nil {
 		a.Logger.Error("Failed to list data sources", "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve data sources")
@@ -170,7 +173,9 @@ func (a *API) ListDataSourcesHandler(w http.ResponseWriter, r *http.Request) {
 	if sources == nil {
 		sources = []datasources.DataSourceMetadata{}
 	}
-	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"dataSources": sources})
+	a.Logger.Info("sending sources", "sources", sources)
+	// Return the naked array so protojson mapping works properly on the elements
+	response.WriteJSON(w, http.StatusOK, sources)
 }
 
 func (a *API) ListFilesMetadataHandler(w http.ResponseWriter, r *http.Request) {
@@ -179,17 +184,19 @@ func (a *API) ListFilesMetadataHandler(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data source ID format")
 		return
 	}
+	a.Logger.Debug("getting files metadata", "id", dsID)
 
-	files, err := a.Store.ListFilesMetadata(r.Context(), dsID)
+	files, err := a.DataSourceDB.ListFilesMetadata(r.Context(), dsID)
 	if err != nil {
 		a.Logger.Error("Failed to list file metadata", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve file metadata")
 		return
 	}
+	a.Logger.Debug("got files metadata", "id", dsID, "files", files)
 	if files == nil {
 		files = []datasources.FileMetadata{}
 	}
-	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"files": files})
+	response.WriteJSON(w, http.StatusOK, files)
 }
 
 func (a *API) ListProfilesHandler(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +206,7 @@ func (a *API) ListProfilesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profiles, err := a.Store.ListProfiles(r.Context(), dsID)
+	profiles, err := a.ProfileDB.ListProfiles(r.Context(), dsID)
 	if err != nil {
 		a.Logger.Error("Failed to list profiles", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve profiles")
@@ -208,7 +215,7 @@ func (a *API) ListProfilesHandler(w http.ResponseWriter, r *http.Request) {
 	if profiles == nil {
 		profiles = []datasources.Profile{}
 	}
-	response.WriteJSON(w, http.StatusOK, map[string]interface{}{"profiles": profiles})
+	response.WriteJSON(w, http.StatusOK, profiles)
 }
 
 func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
@@ -235,16 +242,17 @@ func (a *API) CreateProfileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	profileIDStr := "urn:profile:" + uuid.New().String()
+	profileURN, _ := urn.Parse(profileIDStr)
 
 	profile := &datasources.Profile{
-		ID:        profileIDStr,
+		ID:        profileURN,
 		Name:      req.Name,
 		RulesYaml: req.RulesYaml,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
-	if err := a.Store.CreateProfile(r.Context(), dsID, profile); err != nil {
+	if err := a.ProfileDB.CreateProfile(r.Context(), dsID, profile); err != nil {
 		a.Logger.Error("Failed to create profile", "dsID", dsID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to create profile")
 		return
@@ -283,13 +291,13 @@ func (a *API) UpdateProfileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	profile := &datasources.Profile{
-		ID:        profileID.String(),
+		ID:        profileID,
 		Name:      req.Name,
 		RulesYaml: req.RulesYaml,
 		UpdatedAt: time.Now(),
 	}
 
-	if err := a.Store.UpdateProfile(r.Context(), dsID, profile); err != nil {
+	if err := a.ProfileDB.UpdateProfile(r.Context(), dsID, profile); err != nil {
 		a.Logger.Error("Failed to update profile", "profileId", profileID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to update profile")
 		return
@@ -311,13 +319,14 @@ func (a *API) DeleteProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.Store.DeleteProfile(r.Context(), dsID, profileID); err != nil {
+	if err := a.ProfileDB.DeleteProfile(r.Context(), dsID, profileID); err != nil {
 		a.Logger.Error("Failed to delete profile", "profileId", profileID.String(), "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to delete profile")
 		return
 	}
 
-	response.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	// Correctly return a 204 No Content for successful deletion instead of an arbitrary JSON payload
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) GetFileContentHandler(w http.ResponseWriter, r *http.Request) {
@@ -333,14 +342,118 @@ func (a *API) GetFileContentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := a.Store.GetFileContent(r.Context(), dsID, base64Path)
+	content, err := a.DataSourceDB.GetFileContent(r.Context(), dsID, base64Path)
 	if err != nil {
 		a.Logger.Error("Failed to fetch file content", "dsID", dsID.String(), "docId", base64Path, "error", err)
 		response.WriteJSONError(w, http.StatusNotFound, "File not found or unreadable")
 		return
 	}
 
+	// Note: This endpoint is explicitly typed as `{ content: string }` in the Angular facade
 	response.WriteJSON(w, http.StatusOK, map[string]string{
 		"content": content,
 	})
+}
+
+// --- DATA GROUP HANDLERS ---
+
+func (a *API) ListDataGroupsHandler(w http.ResponseWriter, r *http.Request) {
+	groups, err := a.DataGroupDB.ListDataGroups(r.Context())
+	if err != nil {
+		a.Logger.Error("Failed to list data groups", "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to retrieve data groups")
+		return
+	}
+	if groups == nil {
+		groups = []datasources.DataGroup{}
+	}
+	response.WriteJSON(w, http.StatusOK, groups)
+}
+
+func (a *API) CreateDataGroupHandler(w http.ResponseWriter, r *http.Request) {
+	var req datasources.DataGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.Logger.Warn("Invalid JSON body received", "error", err)
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+
+	if req.Name == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "'name' is a required field")
+		return
+	}
+
+	dgURN, _ := urn.New("data", "datagroup", uuid.New().String())
+
+	now := time.Now()
+	group := &datasources.DataGroup{
+		ID:          dgURN,
+		Name:        req.Name,
+		Description: req.Description,
+		Sources:     req.Sources,
+		Metadata:    req.Metadata,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := a.DataGroupDB.CreateDataGroup(r.Context(), group); err != nil {
+		a.Logger.Error("Failed to create data group", "dgID", dgURN, "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist data group")
+		return
+	}
+
+	response.WriteJSON(w, http.StatusCreated, group)
+}
+
+func (a *API) UpdateDataGroupHandler(w http.ResponseWriter, r *http.Request) {
+	dgID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data group ID format")
+		return
+	}
+
+	var req datasources.DataGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+
+	if req.Name == "" {
+		response.WriteJSONError(w, http.StatusBadRequest, "'name' is a required field")
+		return
+	}
+
+	group := &datasources.DataGroup{
+		ID:          dgID,
+		Name:        req.Name,
+		Description: req.Description,
+		Sources:     req.Sources,
+		Metadata:    req.Metadata,
+		UpdatedAt:   time.Now(),
+	}
+
+	if err := a.DataGroupDB.UpdateDataGroup(r.Context(), group); err != nil {
+		a.Logger.Error("Failed to update data group", "dgID", dgID.String(), "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to update data group")
+		return
+	}
+
+	response.WriteJSON(w, http.StatusOK, group)
+}
+
+func (a *API) DeleteDataGroupHandler(w http.ResponseWriter, r *http.Request) {
+	dgID, err := urn.Parse(r.PathValue("id"))
+	if err != nil {
+		response.WriteJSONError(w, http.StatusBadRequest, "Invalid data group ID format")
+		return
+	}
+
+	if err := a.DataGroupDB.DeleteDataGroup(r.Context(), dgID.String()); err != nil {
+		a.Logger.Error("Failed to delete data group", "dgID", dgID.String(), "error", err)
+		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to delete data group")
+		return
+	}
+
+	// Return clean No Content instead of random JSON payload
+	w.WriteHeader(http.StatusNoContent)
 }
