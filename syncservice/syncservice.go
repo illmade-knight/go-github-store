@@ -22,16 +22,20 @@ type Wrapper struct {
 func NewSyncService(
 	cfg *config.Config,
 	fetcher github.Fetcher,
-	dbStore store.Store,
+	dataSourceDB store.DataSourceStore,
+	profileDB store.ProfileStore,
+	dataGroupDB store.DataGroupStore,
 	authMiddleware func(http.Handler) http.Handler,
 	logger *slog.Logger,
 ) *Wrapper {
 	baseServer := microservice.NewBaseServer(logger, cfg.HTTPListenAddr)
 
 	apiHandler := &api.API{
-		Fetcher: fetcher,
-		Store:   dbStore,
-		Logger:  logger.With("component", "API"),
+		Fetcher:      fetcher,
+		DataSourceDB: dataSourceDB,
+		ProfileDB:    profileDB,
+		DataGroupDB:  dataGroupDB,
+		Logger:       logger.With("component", "API"),
 	}
 
 	mux := baseServer.Mux()
@@ -40,39 +44,59 @@ func NewSyncService(
 
 	optionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
-	mux.Handle("OPTIONS /v1/data-sources", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/data-sources/{id}/sync", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/data-sources/{id}/files", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/data-sources/{id}/profiles", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/data-sources/{id}/profiles/{profileId}", corsMiddleware(optionsHandler))
-	mux.Handle("OPTIONS /v1/data-sources/{id}/files/{base64Path}/content", corsMiddleware(optionsHandler))
+	// --- DATA SOURCE & PROFILE OPTIONS ---
+	mux.Handle("OPTIONS /v1/data/source", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/source/{id}/sync", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/source/{id}/files", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/source/{id}/profiles", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/source/{id}/profiles/{profileId}", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/source/{id}/files/{base64Path}/content", corsMiddleware(optionsHandler))
 
+	// --- DATAGROUP OPTIONS ---
+	mux.Handle("OPTIONS /v1/data/groups", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /v1/data/groups/{id}", corsMiddleware(optionsHandler))
+
+	// --- DATA SOURCE ENDPOINTS ---
 	listDataSourcesEndpoint := http.HandlerFunc(apiHandler.ListDataSourcesHandler)
-	mux.Handle("GET /v1/data-sources", corsMiddleware(authMiddleware(listDataSourcesEndpoint)))
+	mux.Handle("GET /v1/data/sources", corsMiddleware(authMiddleware(listDataSourcesEndpoint)))
 
 	createDataSourceEndpoint := http.HandlerFunc(apiHandler.CreateDataSourceHandler)
-	mux.Handle("POST /v1/data-sources", corsMiddleware(authMiddleware(createDataSourceEndpoint)))
+	mux.Handle("POST /v1/data/sources", corsMiddleware(authMiddleware(createDataSourceEndpoint)))
 
 	syncEndpoint := http.HandlerFunc(apiHandler.SyncHandler)
-	mux.Handle("POST /v1/data-sources/{id}/sync", corsMiddleware(authMiddleware(syncEndpoint)))
+	mux.Handle("POST /v1/data/sources/{id}/sync", corsMiddleware(authMiddleware(syncEndpoint)))
 
 	listFilesEndpoint := http.HandlerFunc(apiHandler.ListFilesMetadataHandler)
-	mux.Handle("GET /v1/data-sources/{id}/files", corsMiddleware(authMiddleware(listFilesEndpoint)))
+	mux.Handle("GET /v1/data/sources/{id}/files", corsMiddleware(authMiddleware(listFilesEndpoint)))
 
 	getFileContentEndpoint := http.HandlerFunc(apiHandler.GetFileContentHandler)
-	mux.Handle("GET /v1/data-sources/{id}/files/{base64Path}/content", corsMiddleware(authMiddleware(getFileContentEndpoint)))
+	mux.Handle("GET /v1/data/sources/{id}/files/{base64Path}/content", corsMiddleware(authMiddleware(getFileContentEndpoint)))
 
+	// --- PROFILE ENDPOINTS ---
 	listProfilesEndpoint := http.HandlerFunc(apiHandler.ListProfilesHandler)
-	mux.Handle("GET /v1/data-sources/{id}/profiles", corsMiddleware(authMiddleware(listProfilesEndpoint)))
+	mux.Handle("GET /v1/data/sources/{id}/profiles", corsMiddleware(authMiddleware(listProfilesEndpoint)))
 
 	createProfileEndpoint := http.HandlerFunc(apiHandler.CreateProfileHandler)
-	mux.Handle("POST /v1/data-sources/{id}/profiles", corsMiddleware(authMiddleware(createProfileEndpoint)))
+	mux.Handle("POST /v1/data/sources/{id}/profiles", corsMiddleware(authMiddleware(createProfileEndpoint)))
 
 	updateProfileEndpoint := http.HandlerFunc(apiHandler.UpdateProfileHandler)
-	mux.Handle("PUT /v1/data-sources/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(updateProfileEndpoint)))
+	mux.Handle("PUT /v1/data/sources/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(updateProfileEndpoint)))
 
 	deleteProfileEndpoint := http.HandlerFunc(apiHandler.DeleteProfileHandler)
-	mux.Handle("DELETE /v1/data-sources/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(deleteProfileEndpoint)))
+	mux.Handle("DELETE /v1/data/sources/{id}/profiles/{profileId}", corsMiddleware(authMiddleware(deleteProfileEndpoint)))
+
+	// --- DATA GROUP ENDPOINTS ---
+	listDataGroupsEndpoint := http.HandlerFunc(apiHandler.ListDataGroupsHandler)
+	mux.Handle("GET /v1/data/groups", corsMiddleware(authMiddleware(listDataGroupsEndpoint)))
+
+	createDataGroupEndpoint := http.HandlerFunc(apiHandler.CreateDataGroupHandler)
+	mux.Handle("POST /v1/data/groups", corsMiddleware(authMiddleware(createDataGroupEndpoint)))
+
+	updateDataGroupEndpoint := http.HandlerFunc(apiHandler.UpdateDataGroupHandler)
+	mux.Handle("PUT /v1/data/groups/{id}", corsMiddleware(authMiddleware(updateDataGroupEndpoint)))
+
+	deleteDataGroupEndpoint := http.HandlerFunc(apiHandler.DeleteDataGroupHandler)
+	mux.Handle("DELETE /v1/data/groups/{id}", corsMiddleware(authMiddleware(deleteDataGroupEndpoint)))
 
 	return &Wrapper{
 		BaseServer: baseServer,

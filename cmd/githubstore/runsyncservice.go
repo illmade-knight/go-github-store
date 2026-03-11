@@ -74,7 +74,8 @@ func main() {
 	}
 
 	// 6. Initialize and Start the Service
-	serviceWrapper := syncservice.NewSyncService(cfg, githubFetcher, firestoreStore, authMiddleware, logger)
+	// We pass firestoreStore 3 times because it implements DataSourceStore, ProfileStore, and DataGroupStore
+	serviceWrapper := syncservice.NewSyncService(cfg, githubFetcher, firestoreStore, firestoreStore, firestoreStore, authMiddleware, logger)
 
 	// --- 5. Start Service and Handle Shutdown ---
 	errChan := make(chan error, 1)
@@ -104,10 +105,10 @@ func main() {
 	}
 }
 
-// newDependencies builds the GenAI client.
-func newDependencies(ctx context.Context, cfg *config.Config, logger *slog.Logger) (store.Store, *github.Client, error) {
+// newDependencies builds the infrastructure clients.
+// Notice the return type is now the concrete *store.FirestoreClient
+func newDependencies(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*store.FirestoreClient, *github.Client, error) {
 	// 5. Initialize Infrastructure Clients
-	// Firestore relies on GOOGLE_APPLICATION_CREDENTIALS being present in the environment
 	fsClient, err := firestore.NewClient(ctx, cfg.GoogleProjectID)
 	if err != nil {
 		logger.Error("Failed to initialize Firestore client", "error", err)

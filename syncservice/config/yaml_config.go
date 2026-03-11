@@ -14,9 +14,10 @@ type YamlConfig struct {
 	IdentityServiceURL string `yaml:"identity_service_url"`
 	GoogleProjectID    string `yaml:"google_project_id"`
 	StoreCollections   struct {
-		BundleCollection   string `yaml:"bundle_collection"`
-		FilesCollection    string `yaml:"files_collection"`
-		ProfilesCollection string `yaml:"profiles_collection"`
+		BundleCollection     string `yaml:"bundle_collection"`
+		FilesCollection      string `yaml:"files_collection"`
+		ProfilesCollection   string `yaml:"profiles_collection"`
+		DatagroupsCollection string `yaml:"datagroups_collection"` // NEW: Added mapped YAML property
 	} `yaml:"firestore"`
 	Cors struct {
 		AllowedOrigins []string `yaml:"allowed_origins"`
@@ -48,15 +49,21 @@ func NewConfigFromYaml(baseCfg *YamlConfig, logger *slog.Logger) (*Config, error
 		pc = "FilterProfiles"
 	}
 
+	dc := baseCfg.StoreCollections.DatagroupsCollection
+	if dc == "" {
+		dc = "DataGroups"
+	}
+
 	cfg := &Config{
 		RunMode:            baseCfg.RunMode,
 		HTTPListenAddr:     baseCfg.HTTPListenAddr,
 		IdentityServiceURL: baseCfg.IdentityServiceURL,
 		GoogleProjectID:    baseCfg.GoogleProjectID,
 		StoreCollections: store.StoreCollections{
-			BundleCollection:   bc,
-			FilesCollection:    fc,
-			ProfilesCollection: pc,
+			BundleCollection:     bc,
+			FilesCollection:      fc,
+			ProfilesCollection:   pc,
+			DatagroupsCollection: dc,
 		},
 		CorsConfig: middleware.CorsConfig{
 			AllowedOrigins: baseCfg.Cors.AllowedOrigins,
