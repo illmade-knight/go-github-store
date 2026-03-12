@@ -60,8 +60,11 @@ func (a *API) CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dsIDStr := "urn:data-source:" + uuid.New().String()
-	dsURN, _ := urn.Parse(dsIDStr)
+	dsURN, err := urn.New("data-sources", "repo", uuid.New().String())
+	if err != nil {
+		response.WriteJSONError(w, http.StatusInternalServerError, "could not create urn")
+		return
+	}
 
 	meta := &datasources.DataSourceMetadata{
 		ID:              dsURN,
@@ -84,7 +87,7 @@ func (a *API) CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.DataSourceDB.CreateDataSource(r.Context(), meta); err != nil {
-		a.Logger.Error("Failed to create data source skeleton", "dsID", dsIDStr, "error", err)
+		a.Logger.Error("Failed to create data source skeleton", "dsID", dsURN, "error", err)
 		response.WriteJSONError(w, http.StatusInternalServerError, "Failed to persist data source skeleton")
 		return
 	}
